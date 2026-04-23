@@ -1,0 +1,37 @@
+.env
+.env.local
+*.pem
+*.key
+
+# Terraform
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/.terraform.lock.hcl
+**/tfplan
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+*.zip
+
+# uv
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+
+# Local dev artifacts
+.env.local
+.env.aws.*
+secrets/
+data/

@@ -1,0 +1,28 @@
+# Per-agent model + fallback config — hot-swappable without code change.
+# Read by crew.py at task startup.
+# Model strings are OpenRouter slugs (provider/model-id).
+
+engineering_lead:
+  model: anthropic/claude-sonnet-4-6
+  fallback:
+    - openai/gpt-5
+    - anthropic/claude-haiku-4-5
+
+backend_engineer:
+  model: anthropic/claude-sonnet-4-6
+  fallback:
+    - openai/gpt-5
+    - anthropic/claude-haiku-4-5
+
+frontend_engineer:
+  model: anthropic/claude-sonnet-4-6
+  fallback:
+    - openai/gpt-5
+    - anthropic/claude-haiku-4-5
+
+qa_engineer:
+  # Tool-heavy work; Haiku is cost-optimized and plenty capable for gate-checks.
+  model: anthropic/claude-haiku-4-5
+  fallback:
+    - openai/gpt-5-mini
+    - anthropic/claude-sonnet-4-6

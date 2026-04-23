@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# DevForge AWS deployment — codifies the Day 1-3 push sequence so it's re-runnable.
+#
+# Usage:
+#   ./scripts/deploy_aws.sh all           # apply 1,2,3,5,6,7 in order + build + push + migrate
+#   ./scripts/deploy_aws.sh permissions   # just 1_permissions
+#   ./scripts/deploy_aws.sh sagemaker     # just 2_sagemaker
+#   ./scripts/deploy_aws.sh ingestion     # build ingest lambda zip + apply 3_ingestion
+#   ./scripts/deploy_aws.sh database      # just 5_database + run migrations
+#   ./scripts/deploy_aws.sh worker        # build + push worker image + apply 6_worker
+#   ./scripts/deploy_aws.sh control-plane # build + push cp image + apply 7_control_plane
+#   ./scripts/deploy_aws.sh destroy       # tear everything down (reverse order)
+#
+# Prereqs: aws cli signed in, docker running, uv installed.
+# Reads terraform/*/terraform.tfvars.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+export DEVFORGE_BACKEND=aws
+export AWS_REGION="${AWS_REGION:-us-east-1}"
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+ECR_BASE="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+tf_apply() {
+  local dir="$1"
+  echo "== terraform apply :: $dir =="
+  ( cd "$dir" && terraform init -input=false -upgrade=false >/dev/null && terraform apply -auto-approve -input=false )
+}
+
+tf_destroy() {
+  local dir="$1"
+  echo "== terraform destroy :: $dir =="
+  ( cd "$dir" && terraform destroy -auto-approve -input=false )
+}
+
+ecr_login() {
+  aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_BASE" >/dev/null
+}
+
+ensure_ecr_repo() {
+  local repo="$1"
+  aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1 \
+    || aws ecr create-repository --repository-name "$repo" --region "$AWS_REGION" --image-scanning-configuration scanOnPush=true >/dev/null
+}
+
+build_push() {
+  local dir="$1" repo="$2" tag="${3:-latest}"
+  ensure_ecr_repo "$repo"
+  ecr_login
+  docker build --platform linux/amd64 -t "${ECR_BASE}/${repo}:${tag}" "$dir"
+  docker push "${ECR_BASE}/${repo}:${tag}"
+}
+
+build_ingest_zip() {
+  echo "== building ingest lambda_function.zip =="
+  ( cd backend/ingest && uv sync && uv run python package.py )
+}
+
+create_s3vectors_bucket_and_index() {
+  local bucket="devforge-vectors-${ACCOUNT}"
+  aws s3vectors create-vector-bucket --vector-bucket-name "$bucket" --region "$AWS_REGION" 2>/dev/null || true
+  aws s3vectors create-index \
+    --vector-bucket-name "$bucket" \
+    --index-name "${VECTOR_INDEX:-financial-research}" \
+    --dimension 384 --distance-metric cosine --data-type float32 \
+    --region "$AWS_REGION" 2>/dev/null || true
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  permissions)
+    tf_apply terraform/1_permissions
+    echo "NOTE: populate the two secrets before deploying worker / control plane:"
+    echo "  aws secretsmanager put-secret-value --secret-id devforge/openrouter-api-key --secret-string 'sk-or-v1-...'"
+    echo "  aws secretsmanager put-secret-value --secret-id devforge/github-app-private-key --secret-string \"\$(cat path/to/app.pem)\""
+    ;;
+
+  sagemaker)
+    tf_apply terraform/2_sagemaker
+    ;;
+
+  ingestion)
+    build_ingest_zip
+    tf_apply terraform/3_ingestion
+    create_s3vectors_bucket_and_index
+    ;;
+
+  database)
+    tf_apply terraform/5_database
+    CLUSTER_ARN=$(cd terraform/5_database && terraform output -raw aurora_cluster_arn)
+    SECRET_ARN=$(cd terraform/5_database && terraform output -raw aurora_secret_arn)
+    AURORA_CLUSTER_ARN="$CLUSTER_ARN" AURORA_SECRET_ARN="$SECRET_ARN" \
+      uv run python -m backend.database.run_migrations
+    ;;
+
+  worker)
+    build_push backend/worker devforge-worker day2
+    tf_apply terraform/6_worker
+    ;;
+
+  control-plane)
+    build_push backend/control_plane devforge-control-plane day3
+    tf_apply terraform/7_control_plane
+    ;;
+
+  all)
+    bash "$0" permissions
+    bash "$0" sagemaker
+    bash "$0" ingestion
+    bash "$0" database
+    bash "$0" worker
+    bash "$0" control-plane
+    ;;
+
+  destroy)
+    tf_destroy terraform/7_control_plane || true
+    tf_destroy terraform/5_database || true
+    tf_destroy terraform/6_worker || true
+    tf_destroy terraform/3_ingestion || true
+    tf_destroy terraform/2_sagemaker || true
+    tf_destroy terraform/1_permissions || true
+    aws ecr delete-repository --repository-name devforge-worker --region "$AWS_REGION" --force 2>/dev/null || true
+    aws ecr delete-repository --repository-name devforge-control-plane --region "$AWS_REGION" --force 2>/dev/null || true
+    aws s3vectors delete-index --vector-bucket-name "devforge-vectors-${ACCOUNT}" --index-name "${VECTOR_INDEX:-financial-research}" --region "$AWS_REGION" 2>/dev/null || true
+    aws s3vectors delete-vector-bucket --vector-bucket-name "devforge-vectors-${ACCOUNT}" --region "$AWS_REGION" 2>/dev/null || true
+    echo "DevForge AWS resources destroyed."
+    ;;
+
+  *)
+    echo "usage: $0 {all|permissions|sagemaker|ingestion|database|worker|control-plane|destroy}"
+    exit 1
+    ;;
+esac
