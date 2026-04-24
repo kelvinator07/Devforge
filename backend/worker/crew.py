@@ -19,7 +19,9 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=False)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_REPO_ROOT / ".env.local", override=False)
+load_dotenv(_REPO_ROOT / ".env", override=False)
 
 from agents import Agent, Runner, set_default_openai_client, set_tracing_disabled  # noqa: E402
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel  # noqa: E402
@@ -112,6 +114,36 @@ async def attacker_probe() -> None:
         print(f"[probe] EXPECTED block: {type(exc).__name__}: {exc}", flush=True)
 
 
+async def plan_mode() -> None:
+    """Run the EngineeringLead agent against a ticket supplied via env vars.
+
+    Required env:
+      DEVFORGE_TICKET_ID, DEVFORGE_TICKET_TITLE, DEVFORGE_TICKET_BODY, DEVFORGE_TENANT_ID
+    """
+    from backend.ingest.index_tenant_repo import search_codebase
+    from backend.worker.lead import plan_ticket
+
+    tenant_id = int(os.environ.get("DEVFORGE_TENANT_ID", "1"))
+    ticket_id = os.environ.get("DEVFORGE_TICKET_ID", "DEMO-1")
+    ticket_title = os.environ.get("DEVFORGE_TICKET_TITLE", "Add /stats endpoint returning user count")
+    ticket_body = os.environ.get(
+        "DEVFORGE_TICKET_BODY",
+        "Add a GET /stats endpoint that returns JSON {\"user_count\": N} where "
+        "N is len(USERS). Add a test case in tests/test_main.py.",
+    )
+
+    print(f"[plan] backend: {os.environ.get('DEVFORGE_BACKEND', 'local')}", flush=True)
+    print(f"[plan] tenant_id: {tenant_id}", flush=True)
+    print(f"[plan] ticket: {ticket_id} {ticket_title!r}", flush=True)
+
+    hits = search_codebase(tenant_id, f"{ticket_title}\n{ticket_body}", k=6)
+    print(f"[plan] retrieved {len(hits)} codebase chunks", flush=True)
+
+    plan = await plan_ticket(ticket_id, ticket_title, ticket_body, hits)
+    print("\n=== TaskPlan ===")
+    print(plan.model_dump_json(indent=2))
+
+
 async def main() -> None:
     mode = os.environ.get("DEVFORGE_WORKER_MODE", "smoke")
     if mode == "smoke":
@@ -120,6 +152,8 @@ async def main() -> None:
         await embed_smoke()
     elif mode == "attacker":
         await attacker_probe()
+    elif mode == "plan":
+        await plan_mode()
     elif mode == "all":
         await smoke_test()
         await embed_smoke()

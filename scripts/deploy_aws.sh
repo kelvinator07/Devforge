@@ -45,10 +45,12 @@ ensure_ecr_repo() {
 }
 
 build_push() {
-  local dir="$1" repo="$2" tag="${3:-latest}"
+  # Always builds from the devforge/ repo root so the image can pull in the
+  # full backend/ tree (common + ingest + mcp + worker or control_plane).
+  local dockerfile="$1" repo="$2" tag="${3:-latest}"
   ensure_ecr_repo "$repo"
   ecr_login
-  docker build --platform linux/amd64 -t "${ECR_BASE}/${repo}:${tag}" "$dir"
+  docker build --platform linux/amd64 -f "$dockerfile" -t "${ECR_BASE}/${repo}:${tag}" .
   docker push "${ECR_BASE}/${repo}:${tag}"
 }
 
@@ -96,12 +98,13 @@ case "$cmd" in
     ;;
 
   worker)
-    build_push backend/worker devforge-worker day2
+    # Dockerfile lives under backend/worker/ but build context is the repo root.
+    build_push backend/worker/Dockerfile devforge-worker "${WORKER_TAG:-day7}"
     tf_apply terraform/6_worker
     ;;
 
   control-plane)
-    build_push backend/control_plane devforge-control-plane day3
+    build_push backend/control_plane/Dockerfile devforge-control-plane "${CP_TAG:-day7}"
     tf_apply terraform/7_control_plane
     ;;
 

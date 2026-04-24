@@ -22,7 +22,9 @@ from mangum import Mangum
 from pydantic import BaseModel, Field
 
 # Local dev: load .env before anything else reads env.
-load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=False)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_REPO_ROOT / ".env.local", override=False)
+load_dotenv(_REPO_ROOT / ".env", override=False)
 
 from backend.common import get_backend  # noqa: E402
 from backend.control_plane.github_app import installation_token_for  # noqa: E402

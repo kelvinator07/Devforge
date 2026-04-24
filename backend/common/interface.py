@@ -37,6 +37,14 @@ class Vectors(ABC):
     def put(self, index: str, key: str, vector: list[float], metadata: dict) -> None:
         """Upsert a vector under `key` in the given `index`."""
 
+    def put_many(self, index: str, items: list[dict]) -> None:
+        """Batched upsert. `items` = [{key, vector, metadata}, ...].
+
+        Default fallback loops; backends override with a batched call.
+        """
+        for it in items:
+            self.put(index, it["key"], it["vector"], it["metadata"])
+
     @abstractmethod
     def query(self, index: str, vector: list[float], k: int = 8) -> list[dict]:
         """Return top-`k` nearest records as list of {key, score, metadata}."""

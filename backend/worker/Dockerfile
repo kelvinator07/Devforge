@@ -1,11 +1,16 @@
 # DevForge worker — ECS Fargate task image.
-# Derived from alex/backend/researcher/Dockerfile; swaps litellm/Bedrock wiring
-# for the OpenAI-compatible client pointed at OpenRouter.
+# Build context MUST be the devforge/ repo root so we can pull in `backend/`
+# (common + ingest + mcp + worker) and the root pyproject.toml:
+#
+#   docker build --platform linux/amd64 \
+#     -f backend/worker/Dockerfile -t <ecr>/devforge-worker:<tag> .
+#
+# scripts/deploy_aws.sh takes care of that.
 FROM --platform=linux/amd64 python:3.12-slim
 
 WORKDIR /app
 
-# System packages: git + gh CLI + curl for node installer.
+# System packages: git (worktree ops), gh CLI (Day 3 tooling), nodejs (npm/npx MCPs).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git \
  && install -m 0755 -d /etc/apt/keyrings \
@@ -21,12 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python package manager
 RUN pip install --no-cache-dir uv
 
-# Install Python deps ahead of source copy so dependency changes don't blow the cache.
+# Install only the AWS dep set (no sentence-transformers/chromadb in the image).
 COPY pyproject.toml ./
-RUN uv sync --no-install-project
+RUN uv sync --no-install-project --extra aws
 
-# Application code
-COPY *.py *.yaml ./
+# Copy the full backend/ tree so we can `python -m backend.worker.crew` etc.
+COPY backend/ ./backend/
 
-# Default entrypoint runs the Day-2 smoke test. Override via DEVFORGE_WORKER_MODE.
-CMD ["uv", "run", "python", "crew.py"]
+ENV DEVFORGE_BACKEND=aws \
+    PYTHONUNBUFFERED=1
+
+# Default mode is the Day-2 smoke. Override via DEVFORGE_WORKER_MODE.
+CMD ["uv", "run", "python", "-m", "backend.worker.crew"]

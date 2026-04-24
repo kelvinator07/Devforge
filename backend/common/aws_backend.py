@@ -120,6 +120,25 @@ class S3VectorsStore(Vectors):
             }],
         )
 
+    def put_many(self, index: str, items: list[dict]) -> None:
+        # S3 Vectors put_vectors supports up to 500 per call. Chunk conservatively.
+        batch = []
+        for it in items:
+            batch.append({
+                "key": it["key"],
+                "data": {"float32": it["vector"]},
+                "metadata": it["metadata"],
+            })
+            if len(batch) >= 100:
+                self.client.put_vectors(
+                    vectorBucketName=self.bucket, indexName=index, vectors=batch
+                )
+                batch = []
+        if batch:
+            self.client.put_vectors(
+                vectorBucketName=self.bucket, indexName=index, vectors=batch
+            )
+
     def query(self, index: str, vector: list[float], k: int = 8) -> list[dict]:
         resp = self.client.query_vectors(
             vectorBucketName=self.bucket,

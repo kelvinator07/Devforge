@@ -113,11 +113,24 @@ class ChromaVectors(Vectors):
         return self._get_client().get_or_create_collection(name=index)
 
     def put(self, index: str, key: str, vector: list[float], metadata: dict) -> None:
-        # Chroma metadata must be primitive-valued; stringify anything fancy.
         flat = {k: v for k, v in metadata.items() if isinstance(v, (str, int, float, bool))}
         text = metadata.get("text", "")
         self._coll(index).upsert(
             ids=[key], embeddings=[vector], metadatas=[flat], documents=[text]
+        )
+
+    def put_many(self, index: str, items: list[dict]) -> None:
+        if not items:
+            return
+        ids = [it["key"] for it in items]
+        embeddings = [it["vector"] for it in items]
+        metadatas = [
+            {k: v for k, v in it["metadata"].items() if isinstance(v, (str, int, float, bool))}
+            for it in items
+        ]
+        documents = [it["metadata"].get("text", "") for it in items]
+        self._coll(index).upsert(
+            ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents
         )
 
     def query(self, index: str, vector: list[float], k: int = 8) -> list[dict]:
