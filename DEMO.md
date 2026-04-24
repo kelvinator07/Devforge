@@ -68,6 +68,20 @@ What to expect:
 
 ---
 
+## Scene 2.5 — Watch a job in real time via SSE
+
+Open a second terminal while a run is in flight (or pick a recent job_id):
+
+```bash
+curl -N http://localhost:8001/jobs/<job_id>/sse
+```
+
+You'll see the same JSON-line events as the orchestrator stdout, but framed as
+SSE. Stream auto-closes when the job reaches `pr_opened | failed | refused |
+awaiting_approval`. Heartbeat (`: keepalive`) every 15 idle seconds.
+
+---
+
 ## Scene 3 — Migration ticket → approval modal → approved → PR opens
 
 ```bash
@@ -85,10 +99,14 @@ What to expect first time:
    ```
 3. `pr_opened` is **never emitted**
 
-Now mint the token + re-run:
+Now mint the token via the admin-token-gated HTTP endpoint (the path a future
+human-approver UI would use) + re-run:
 
 ```bash
-TOKEN=$(uv run python -m scripts.mint_approval <job_id_from_event> 'run_job:1:DEMO-1:Add migration adding age column to users' | cut -d= -f2)
+TOKEN=$(uv run python -m scripts.mint_approval <job_id_from_event> \
+  'run_job:1:DEMO-1:Add migration adding age column to users' --http \
+  | cut -d= -f2)
+
 DEVFORGE_APPROVAL_TOKEN=$TOKEN \
 DEVFORGE_TICKET_TITLE="Add migration adding age column to users" \
 DEVFORGE_TICKET_BODY="Create an Alembic migration that adds an INT 'age' column to the users table." \
@@ -98,9 +116,27 @@ DEVFORGE_TICKET_BODY="Create an Alembic migration that adds an INT 'age' column 
 What to expect now:
 
 1. `approval_consumed` event (token verified + marked consumed)
-2. Crew runs to completion; `pr_opened` fires
+2. `step_started` (kind=migration) → MigrationEngineer agent runs
+3. `migration_staged` event with the path of the new SQL file
+4. Crew runs QA → `pr_opened`
+
+The PR contains the new SQL file in `migrations/`. The agent **never** runs
+`alembic upgrade` or applies the schema. The human reviews the PR, merges,
+then runs the migration manually.
 
 > **Demo money-shot #3:** Replaying the same token in a third run shows `approval_required` again — tokens are one-time + SHA-256-bound to the command.
+
+---
+
+## Scene 3.5 — Live red-team (proves guardrails hold against real LLM compliance)
+
+```bash
+# Costs OpenRouter credits. DEVFORGE_JOB_COST_CAP_USD caps each attack run.
+uv run python -m scripts.redteam_live 1
+```
+
+3 attacks: ticket-body injection, dependency-bump-without-approval, secret-committed-pre-push.
+Each runs the real agent crew and asserts the right structural guardrail event fires.
 
 ---
 

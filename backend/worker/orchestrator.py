@@ -63,6 +63,34 @@ def _emit(job_id: int | None, event: str, payload: dict | None = None) -> None:
             )
 
 
+def _open_pr(*, repo_full_name: str, branch: str, installation_token: str,
+             title: str, body: str) -> str | None:
+    """Open a PR via GitHub REST. Idempotent: returns existing PR URL if already open."""
+    r = httpx.post(
+        f"https://api.github.com/repos/{repo_full_name}/pulls",
+        headers={
+            "Authorization": f"token {installation_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"title": title, "head": branch, "base": "main", "body": body},
+        timeout=30.0,
+    )
+    if r.status_code in (200, 201):
+        return r.json()["html_url"]
+    if r.status_code == 422 and "already exists" in r.text.lower():
+        owner = repo_full_name.split("/")[0]
+        q = httpx.get(
+            f"https://api.github.com/repos/{repo_full_name}/pulls",
+            headers={"Authorization": f"token {installation_token}"},
+            params={"head": f"{owner}:{branch}", "state": "open"},
+            timeout=15.0,
+        )
+        if q.status_code == 200 and q.json():
+            return q.json()[0]["html_url"]
+    return None
+
+
 def _persist_job(tenant_id: int, repo_id: int, title: str, body: str) -> int:
     rows = get_backend().db.execute(
         """
@@ -204,10 +232,19 @@ async def run_job(
             elif step.kind == StepKind.FRONTEND:
                 result = await run_frontend_step(tenant_id, step, wt.worktree_path)
             elif step.kind == StepKind.MIGRATION:
-                _emit(job_id, "migration_skipped", {"id": step.id,
-                      "note": "migration steps are human-run; see DEMO.md"})
-                continue
+                from backend.worker.migration_engineer import run_migration_step
+                result = await run_migration_step(tenant_id, step, wt.worktree_path)
+                _emit(job_id, "migration_staged", {
+                    "id": step.id,
+                    "files": result.files_changed,
+                    "note": (
+                        "Migration SQL files staged in worktree; review in the PR "
+                        "and apply manually after merge."
+                    ),
+                })
             else:  # QA step in the plan — the real QA gates run at the end below.
+                _emit(job_id, "step_finished", {"id": step.id, "success": True,
+                                                "summary": "QA step deferred to gate run"})
                 continue
             _emit(job_id, "step_finished", {
                 "id": step.id, "success": result.success,
@@ -218,16 +255,7 @@ async def run_job(
                 _emit(job_id, "job_done", {"ok": False, "reason": "step failed"})
                 return {"ok": False, "job_id": job_id}
 
-        # Commit what the engineers produced, push the branch.
-        push = commit_and_push(wt.worktree_path, wt.branch, wt.remote_url,
-                               commit_message=f"{ticket_id}: {ticket_title}\n\n{plan.analysis}")
-        _emit(job_id, "branch_pushed", push)
-        if not push.get("pushed"):
-            _update_job_status(job_id, "failed")
-            _emit(job_id, "job_done", {"ok": False, "reason": "nothing to push"})
-            return {"ok": False, "job_id": job_id}
-
-        # QA gates + PR open.
+        # ---- QA gates run BEFORE push. Push only on all-green. ----
         _emit(job_id, "qa_started", {})
         qa = await run_qa(
             tenant_id=tenant_id,
@@ -238,24 +266,46 @@ async def run_job(
             ticket_body=ticket_body,
             worktree=wt.worktree_path,
         )
-        if qa.passed:
-            _emit(job_id, "qa_gate_passed", {"findings": len(qa.findings)})
-            if qa.pr_url:
-                _emit(job_id, "pr_opened", {"url": qa.pr_url})
-                _update_job_status(job_id, "pr_opened", qa.pr_url)
-                _emit(job_id, "job_done", {"ok": True, "pr_url": qa.pr_url})
-                return {"ok": True, "job_id": job_id, "pr_url": qa.pr_url}
-            _emit(job_id, "pr_open_failed", {})
-            _update_job_status(job_id, "failed")
-            return {"ok": False, "job_id": job_id}
-        else:
+        if not qa.passed:
             _emit(job_id, "qa_gate_failed", {
                 "findings": [f.model_dump() for f in qa.findings][:10],
                 "count": len(qa.findings),
             })
             _update_job_status(job_id, "failed")
-            _emit(job_id, "job_done", {"ok": False, "reason": "qa gates failed"})
+            _emit(job_id, "job_done", {"ok": False, "reason": "qa gates failed",
+                                       "branch_pushed": False})
             return {"ok": False, "job_id": job_id}
+
+        _emit(job_id, "qa_gate_passed", {"findings": len(qa.findings)})
+
+        # All-green: commit + push the branch, then open PR via REST.
+        push = commit_and_push(
+            wt.worktree_path, wt.branch, wt.remote_url,
+            commit_message=f"{ticket_id}: {ticket_title}\n\n{plan.analysis}",
+        )
+        _emit(job_id, "branch_pushed", push)
+        if not push.get("pushed"):
+            _update_job_status(job_id, "failed")
+            _emit(job_id, "job_done", {"ok": False, "reason": "nothing to push"})
+            return {"ok": False, "job_id": job_id}
+
+        # Open PR.
+        pr_url = _open_pr(
+            repo_full_name=repo_full_name,
+            branch=wt.branch,
+            installation_token=installation_token,
+            title=ticket_title,
+            body=f"{ticket_body}\n\n---\n🤖 Opened by DevForge orchestrator after all gates passed.",
+        )
+        if pr_url:
+            _emit(job_id, "pr_opened", {"url": pr_url})
+            _update_job_status(job_id, "pr_opened", pr_url)
+            _emit(job_id, "job_done", {"ok": True, "pr_url": pr_url})
+            return {"ok": True, "job_id": job_id, "pr_url": pr_url}
+
+        _emit(job_id, "pr_open_failed", {})
+        _update_job_status(job_id, "failed")
+        return {"ok": False, "job_id": job_id}
     finally:
         wt.cleanup()
         # Always emit a cost summary so the dashboard has data, even on failure.

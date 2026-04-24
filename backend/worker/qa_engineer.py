@@ -1,23 +1,23 @@
 """QAEngineer agent.
 
-Runs all gates against a worktree + a branch that BackendEngineer has already
-committed to. Opens the PR ONLY when every gate is green. Gates:
+Runs all gates against the worktree (not yet pushed). Reports gates pass/fail
+to the orchestrator. The orchestrator handles push + PR open ONLY when QA
+returns passed=True. Gates:
 
   1. run_tests          -> exit 0 required
   2. run_coverage(50)   -> coverage >= 50% required (meets_threshold True)
   3. run_semgrep        -> zero HIGH/ERROR-severity findings
   4. run_gitleaks       -> zero detect-secrets findings
 
-PR opening is handled by a local function_tool `create_pr` that talks to the
-GitHub REST API with a fresh installation token. The agent MUST only call
-`submit_for_review`, which wraps `create_pr` behind a passed-all-gates check.
+Note: QA does NOT open the PR or push. That's intentional — running gates
+against the unpushed worktree means a secret detected by gitleaks never
+reaches the remote.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-import httpx
 from agents import Agent, Runner, function_tool
 from agents.mcp import MCPServerStdio
 from pydantic import BaseModel, Field
@@ -26,31 +26,33 @@ from backend.worker.crew import load_model_config, openrouter_model
 
 
 QA_INSTRUCTIONS = """\
-You are DevForge's QA Engineer. A BackendEngineer has already committed code
-to a feature branch. Your job: run the full quality gate suite, report the
-results, and open a Pull Request IF AND ONLY IF every gate is green.
+You are DevForge's QA Engineer. The BackendEngineer has written code into a
+git worktree but has NOT yet pushed or committed. Your job: run the full
+quality gate suite, report the results, and decide whether the code is ready
+for the orchestrator to push + open a PR.
 
-Gate order (call all four even if one fails — the user wants the full report):
+Gate order (call all four — the orchestrator wants the full report):
   1. run_tests(framework="uv-pytest")       — exit_code must be 0
   2. run_coverage(min_pct=50)                — meets_threshold must be true
-                                                (None = fail if coverage unavailable,
-                                                 flag it as a finding)
+                                                (None counts as a finding)
   3. run_semgrep(config="auto")              — high_severity_count must be 0
   4. run_gitleaks()                          — findings_count must be 0
 
 After all four, decide: `passed = exit0 AND coverage_ok AND semgrep_ok AND
-secrets_ok`. Then call `submit_for_review` with the final decision + findings.
+secrets_ok`. Then call `record_qa_result(passed, findings_json)`.
 
-`submit_for_review` will open the PR if `passed=True`, or refuse if not. The
-refusal writes the findings back into your output so Backend can re-run.
+The orchestrator will:
+  - if passed=True  -> push the branch and open the PR
+  - if passed=False -> abort the job, surface findings, do NOT push
 
 Rules:
   - Never call any tool to mutate files; you only inspect.
   - Never mark a gate green without running the scanner.
-  - If gitleaks fires, list the file:line of each finding so remediation is cheap.
+  - If gitleaks fires, list `file:line` for each finding so remediation is cheap.
   - Do not disable or configure-around findings. Structural fixes only.
 
-Return a `QAResult` with `passed`, `pr_url` (if opened), and `findings`.
+Return a `QAResult` with `passed` and `findings`. `pr_url` stays null —
+the orchestrator opens the PR after you.
 """
 
 
@@ -62,77 +64,28 @@ class Finding(BaseModel):
 
 class QAResult(BaseModel):
     passed: bool = Field(..., description="True iff all 4 gates green")
-    pr_url: str | None = Field(default=None, description="Set when passed and PR opened")
+    pr_url: str | None = Field(default=None, description="Always null from QA; orchestrator fills this")
     findings: list[Finding] = Field(default_factory=list)
 
 
-def _submit_tool(
-    *,
-    tenant_id: int,
-    repo_full_name: str,
-    branch: str,
-    installation_token: str,
-    ticket_title: str,
-    ticket_body: str,
-):
-    """Build the submit_for_review function_tool bound to this job's context.
+def _record_tool():
+    """No-op recorder: lets the agent commit to a final passed/findings tuple.
 
-    The tool opens a PR via GitHub REST API only when passed=True. We use a
-    closure so the LLM can't accidentally pass the wrong repo/branch.
+    The agent's `output_type=QAResult` is the source of truth; this tool just
+    gives the LLM an explicit "I'm done" handle and avoids it trying to call
+    an HTTP-based PR opener (which only the orchestrator may do).
     """
     @function_tool(
-        name_override="submit_for_review",
+        name_override="record_qa_result",
         description_override=(
-            "Submit the QA result. If passed=True, opens a PR on the feature "
-            "branch; if passed=False, records the findings and does NOT open "
-            "a PR (Backend will re-run). Returns {pr_url | None, recorded: True}."
+            "Final QA decision. Pass passed=True if every gate is green. "
+            "Returns {recorded: True}. Does NOT open a PR — the orchestrator "
+            "does that based on your QAResult output."
         ),
     )
-    def submit_for_review(passed: bool, summary: str, findings_json: str = "[]") -> dict:
-        if not passed:
-            return {"pr_url": None, "recorded": True, "passed": False, "summary": summary}
-        # Open the PR. Base is the repo's default branch (main for the demo).
-        body_text = (
-            f"{ticket_body}\n\n"
-            f"---\n"
-            f"🤖 Opened by DevForge QAEngineer after all 4 gates passed.\n"
-            f"{summary}\n"
-        )
-        r = httpx.post(
-            f"https://api.github.com/repos/{repo_full_name}/pulls",
-            headers={
-                "Authorization": f"token {installation_token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            json={
-                "title": ticket_title,
-                "head": branch,
-                "base": "main",
-                "body": body_text,
-            },
-            timeout=30.0,
-        )
-        if r.status_code in (200, 201):
-            return {"pr_url": r.json()["html_url"], "recorded": True, "passed": True}
-        # Common case: PR already exists for this head -> fetch it.
-        if r.status_code == 422 and "already exists" in r.text.lower():
-            q = httpx.get(
-                f"https://api.github.com/repos/{repo_full_name}/pulls",
-                headers={"Authorization": f"token {installation_token}"},
-                params={"head": f"{repo_full_name.split('/')[0]}:{branch}", "state": "open"},
-                timeout=15.0,
-            )
-            if q.status_code == 200 and q.json():
-                return {"pr_url": q.json()[0]["html_url"], "recorded": True, "passed": True}
-        return {
-            "pr_url": None,
-            "recorded": True,
-            "passed": True,
-            "error": f"PR open failed: {r.status_code} {r.text[:300]}",
-        }
-
-    return submit_for_review
+    def record_qa_result(passed: bool, summary: str, findings_json: str = "[]") -> dict:
+        return {"recorded": True, "passed": passed, "summary": summary[:500]}
+    return record_qa_result
 
 
 def _mcp_env(worktree: Path) -> dict:
@@ -150,7 +103,7 @@ async def run_qa(
     worktree: Path,
     max_iterations: int = 30,
 ) -> QAResult:
-    """Run all four gates inside `worktree`. Returns QAResult with pr_url on all-green."""
+    """Run all four gates inside `worktree`. Returns QAResult; orchestrator pushes + opens PR."""
     models = load_model_config()
     slug = models["qa_engineer"]["model"]
 
@@ -161,27 +114,19 @@ async def run_qa(
     })
 
     async with sandbox_mcp:
-        submit_tool = _submit_tool(
-            tenant_id=tenant_id,
-            repo_full_name=repo_full_name,
-            branch=branch,
-            installation_token=installation_token,
-            ticket_title=ticket_title,
-            ticket_body=ticket_body,
-        )
         agent = Agent(
             name="QAEngineer",
             instructions=QA_INSTRUCTIONS,
             model=openrouter_model(slug),
             mcp_servers=[sandbox_mcp],
-            tools=[submit_tool],
+            tools=[_record_tool()],
             output_type=QAResult,
         )
         user_input = (
-            f"Branch under review: {branch}\n"
+            f"Branch under review (NOT YET PUSHED): {branch}\n"
             f"Repo: {repo_full_name}\n"
             f"Ticket: {ticket_title}\n"
-            "\nRun all four gates, then submit_for_review."
+            "\nRun all four gates against the worktree, then call record_qa_result and return your QAResult."
         )
         result = await Runner.run(agent, input=user_input, max_turns=max_iterations)
         return result.final_output
