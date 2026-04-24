@@ -28,6 +28,8 @@ dependencies = [
 local = [
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
+    "detect-secrets>=1.5.0",    # Day 8: gitleaks alternative for local
+    "semgrep>=1.85.0",           # Day 8: SAST (pulls the binary via pypi wrapper)
 ]
 
 # For deploy-to-AWS — no ML deps, just boto3.
@@ -38,4 +40,9 @@ aws = [
 # All — use this during development so you can flip DEVFORGE_BACKEND freely.
 all = [
     "devforge[local,aws]",
+]
+
+# Optional: observability (Day 12). LangFuse cloud client.
+obs = [
+    "langfuse>=2.45.0",
 ]

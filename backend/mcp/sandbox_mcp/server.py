@@ -127,6 +127,114 @@ def run_build(command: str = "") -> dict:
 
 
 @mcp.tool()
+def run_coverage(min_pct: int = 50) -> dict:
+    """Run pytest under coverage. Returns exit code + total coverage percent.
+
+    Requires `coverage` to be installed in the worktree's env. Falls back to
+    plain pytest if coverage isn't available.
+    """
+    cwd = _cwd()
+    # Best-effort: run via uv so the project's own deps are used.
+    cmd = ["uv", "run", "coverage", "run", "-m", "pytest", "-q"]
+    r = _run(cmd)
+    if r["exit_code"] != 0 or "no module named coverage" in (r["stderr"] or "").lower():
+        # Fall back to plain pytest + report coverage as unknown.
+        return {
+            **_run(["uv", "run", "pytest", "-q"]),
+            "coverage_pct": None,
+            "min_pct": min_pct,
+            "meets_threshold": None,
+        }
+    # Now extract coverage report
+    rep = _run(["uv", "run", "coverage", "report", "--format=total"])
+    try:
+        pct = float((rep["stdout"] or "0").strip())
+    except ValueError:
+        pct = 0.0
+    return {
+        **r,
+        "coverage_pct": pct,
+        "min_pct": min_pct,
+        "meets_threshold": pct >= min_pct,
+    }
+
+
+@mcp.tool()
+def run_semgrep(paths: str = ".", config: str = "auto") -> dict:
+    """Run Semgrep. Returns {exit_code, findings: [{rule, severity, file, line, msg}]}.
+
+    `config='auto'` uses Semgrep's default ruleset. Non-zero exit when HIGH findings exist.
+    """
+    import json as _json
+
+    cmd = ["semgrep", "--config", config, "--json", "--quiet"]
+    cmd.extend(shlex.split(paths))
+    r = _run(cmd)
+    findings: list[dict] = []
+    high_count = 0
+    try:
+        data = _json.loads(r["stdout"] or "{}")
+        for f in data.get("results", []):
+            sev = (f.get("extra", {}).get("severity") or "").upper()
+            if sev in ("ERROR", "HIGH"):
+                high_count += 1
+            findings.append({
+                "rule": f.get("check_id"),
+                "severity": sev,
+                "file": f.get("path"),
+                "line": f.get("start", {}).get("line"),
+                "msg": (f.get("extra", {}).get("message") or "")[:200],
+            })
+    except Exception:
+        pass
+    return {
+        "exit_code": r["exit_code"],
+        "timed_out": r["timed_out"],
+        "high_severity_count": high_count,
+        "total_findings": len(findings),
+        "findings": findings[:50],
+        "cmd": r["cmd"],
+    }
+
+
+@mcp.tool()
+def run_gitleaks(paths: str = ".") -> dict:
+    """Run `detect-secrets` (pure-Python) over the given paths. Returns findings.
+
+    Local-mode DevForge uses detect-secrets because gitleaks isn't on pypi.
+    The Fargate Dockerfile (AWS mode) bundles the gitleaks binary so agents
+    hit the same gate semantics either way.
+    """
+    import json as _json
+
+    # detect-secrets scan outputs JSON to stdout.
+    cmd = ["detect-secrets", "scan", "--all-files"]
+    cmd.extend(shlex.split(paths))
+    r = _run(cmd)
+    findings: list[dict] = []
+    try:
+        data = _json.loads(r["stdout"] or "{}")
+        for fp, items in (data.get("results") or {}).items():
+            for it in items:
+                findings.append({
+                    "file": fp,
+                    "line": it.get("line_number"),
+                    "type": it.get("type"),
+                    "is_secret": it.get("is_secret"),
+                })
+    except Exception:
+        pass
+    # detect-secrets exits 0 even on findings. Treat any finding as a fail.
+    return {
+        "exit_code": 1 if findings else 0,
+        "timed_out": r["timed_out"],
+        "findings_count": len(findings),
+        "findings": findings[:50],
+        "cmd": r["cmd"],
+    }
+
+
+@mcp.tool()
 def git_status() -> dict:
     """Show `git status --short --branch` output for the worktree."""
     return _run(["git", "status", "--short", "--branch"])

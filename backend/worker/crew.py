@@ -28,6 +28,7 @@ from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel  # n
 from openai import AsyncOpenAI  # noqa: E402
 
 from backend.common import get_backend  # noqa: E402
+from backend.cost.tracker import install_cost_hook  # noqa: E402
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -57,8 +58,55 @@ def configure_openrouter() -> AsyncOpenAI:
         },
     )
     set_default_openai_client(_openrouter_client, use_for_tracing=False)
-    set_tracing_disabled(True)
+    # Tracing: opt into LangFuse cloud when env vars are set, otherwise off.
+    if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"):
+        try:
+            _enable_langfuse_tracing()
+        except Exception as exc:  # pragma: no cover - never break agent on observability
+            print(f"[trace] langfuse not enabled: {exc}", flush=True)
+            set_tracing_disabled(True)
+    else:
+        set_tracing_disabled(True)
+    install_cost_hook(_openrouter_client)
     return _openrouter_client
+
+
+def _enable_langfuse_tracing() -> None:
+    """Wire a custom exporter that mirrors Agents-SDK spans to LangFuse cloud.
+
+    No-op if `langfuse` package isn't installed (uv sync --extra obs).
+    """
+    from agents.tracing import add_trace_processor
+    from agents.tracing.processors import BatchTraceProcessor
+
+    try:
+        from langfuse import Langfuse  # type: ignore
+    except ImportError:
+        print("[trace] langfuse package not installed (uv sync --extra obs)", flush=True)
+        set_tracing_disabled(True)
+        return
+
+    lf = Langfuse(
+        public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
+        secret_key=os.environ["LANGFUSE_SECRET_KEY"],
+        host=os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+    )
+
+    class _LangfuseExporter:
+        def export(self, items):  # type: ignore[no-untyped-def]
+            for it in items:
+                payload = getattr(it, "export", lambda: {})()
+                try:
+                    lf.trace(
+                        name=payload.get("name") or payload.get("type", "agent_span"),
+                        metadata=payload,
+                    )
+                except Exception:
+                    pass
+            lf.flush()
+
+    add_trace_processor(BatchTraceProcessor(_LangfuseExporter()))
+    print("[trace] langfuse tracing enabled", flush=True)
 
 
 def openrouter_model(slug: str) -> OpenAIChatCompletionsModel:
