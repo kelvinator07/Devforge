@@ -100,9 +100,15 @@ def configure_openrouter() -> AsyncOpenAI:
 
 
 def _enable_langfuse_tracing() -> None:
-    """Wire a custom exporter that mirrors Agents-SDK spans to LangFuse cloud.
+    """Mirror Agents-SDK traces and spans to LangFuse cloud.
 
-    No-op if `langfuse` package isn't installed (uv sync --extra obs).
+    Implementation: a `TracingExporter` that converts each Agents-SDK `Trace`
+    object into a LangFuse trace, and each `Span` into a child span with the
+    matching parent. Uses langfuse v4's generic OTel-style span API
+    (`start_span` / `update`).
+
+    No-op (and prints a friendly note) if `langfuse` isn't installed
+    (`uv sync --extra obs`).
     """
     from agents.tracing import add_trace_processor
     from agents.tracing.processors import BatchTraceProcessor
@@ -121,20 +127,87 @@ def _enable_langfuse_tracing() -> None:
     )
 
     class _LangfuseExporter:
+        """Maps Agents-SDK Trace/Span objects into LangFuse traces + spans."""
+
         def export(self, items):  # type: ignore[no-untyped-def]
+            # Group items by trace_id so we can build trace -> spans hierarchy
+            # in one pass. Items in a single batch can be a mix of Trace + Span.
+            from agents.tracing.spans import Span  # local import — lazy
+            from agents.tracing.traces import Trace  # local import — lazy
+
+            traces_by_id: dict[str, dict] = {}
+            spans_by_trace: dict[str, list] = {}
+
             for it in items:
-                payload = getattr(it, "export", lambda: {})()
+                data = it.export() if hasattr(it, "export") else {}
+                if not data:
+                    continue
+                if isinstance(it, Trace):
+                    traces_by_id[data.get("id") or data.get("trace_id") or ""] = data
+                elif isinstance(it, Span):
+                    tid = data.get("trace_id") or ""
+                    spans_by_trace.setdefault(tid, []).append(data)
+
+            for trace_id, trace_data in traces_by_id.items():
                 try:
-                    lf.trace(
-                        name=payload.get("name") or payload.get("type", "agent_span"),
-                        metadata=payload,
+                    name = (
+                        trace_data.get("workflow_name")
+                        or trace_data.get("name")
+                        or "agent_workflow"
                     )
-                except Exception:
-                    pass
-            lf.flush()
+                    with lf.start_as_current_observation(
+                        name=name, as_type="agent", metadata=trace_data,
+                    ) as root:
+                        for span_data in spans_by_trace.pop(trace_id, []):
+                            _emit_child_span(root, span_data)
+                except Exception as exc:  # pragma: no cover
+                    print(f"[trace] export failed: {exc}", flush=True)
+
+            # Orphan spans whose parent landed in a different batch — emit as
+            # standalone observations so they're not lost.
+            for span_list in spans_by_trace.values():
+                for span_data in span_list:
+                    try:
+                        sd = span_data.get("span_data") or {}
+                        span_name = sd.get("name") or sd.get("type") or "orphan_span"
+                        with lf.start_as_current_observation(
+                            name=span_name, as_type="span", metadata=span_data,
+                        ):
+                            pass
+                    except Exception:
+                        pass
+
+            try:
+                lf.flush()
+            except Exception:
+                pass
+
+    def _emit_child_span(root, span_data: dict) -> None:
+        """Emit one Agents-SDK Span as a child of `root`. Picks an `as_type`
+        based on the span's `span_data.type`."""
+        sd = span_data.get("span_data") or {}
+        span_type = (sd.get("type") or "").lower()
+        kind_map = {
+            "generation": "generation",
+            "response": "generation",
+            "function": "tool",
+            "tool": "tool",
+            "agent": "agent",
+            "guardrail": "guardrail",
+            "handoff": "chain",
+        }
+        as_type = kind_map.get(span_type, "span")
+        name = sd.get("name") or sd.get("type") or "span"
+
+        with root.start_as_current_observation(
+            name=name, as_type=as_type, metadata=span_data,
+        ) as child:
+            if span_data.get("error"):
+                child.update(level="ERROR", status_message=str(span_data["error"]))
 
     add_trace_processor(BatchTraceProcessor(_LangfuseExporter()))
-    print("[trace] langfuse tracing enabled", flush=True)
+    print(f"[trace] langfuse tracing enabled -> "
+          f"{os.environ.get('LANGFUSE_HOST', 'https://cloud.langfuse.com')}", flush=True)
 
 
 def openrouter_model(slug: str) -> OpenAIChatCompletionsModel:
