@@ -36,8 +36,19 @@ def _cmd_hash(cmd: str) -> str:
     return hashlib.sha256(cmd.strip().encode("utf-8")).hexdigest()
 
 
-def mint(*, job_id: int, command: str) -> str:
-    """Create an approval token for `command`. Returns the raw token (show once)."""
+def mint(*, job_id: int | None = None, command: str) -> str:
+    """Create an approval token bound to `command` (and optionally to `job_id`).
+
+    If `job_id` is None, the token is **command-bound only** — any future
+    job whose orchestrator builds the same `approval_command` (typically
+    `run_job:{tenant_id}:{ticket_id}:{ticket_title}`) will accept it. This
+    is the right shape for human approval because every `run_ticket` call
+    creates a fresh `jobs.id`, so a job-bound token would only ever be
+    valid for the run that *just failed* and isn't rerunable.
+
+    If `job_id` is provided, the token additionally binds to that job
+    (used by tests + the redteam harness that want stricter scoping).
+    """
     raw = secrets.token_urlsafe(32)
     get_backend().db.execute(
         """
@@ -45,7 +56,7 @@ def mint(*, job_id: int, command: str) -> str:
         VALUES (:job, :ch, :th, :exp)
         """,
         {
-            "job": job_id,
+            "job": job_id,  # NULL for ticket-bound tokens (post-migration 003)
             "ch": _cmd_hash(command),
             "th": _hash(raw),
             "exp": (_now() + timedelta(seconds=_ttl_sec())).isoformat(),
@@ -54,26 +65,41 @@ def mint(*, job_id: int, command: str) -> str:
     return raw
 
 
-def verify_and_consume(*, job_id: int, command: str, token_raw: str) -> bool:
+def verify_and_consume(*, job_id: int | None = None, command: str, token_raw: str) -> bool:
     """Return True IFF an un-consumed, un-expired, matching token exists.
 
-    Atomically marks it consumed. Any mismatch (wrong job, wrong command,
-    expired, consumed) returns False without leaking why.
+    Lookup is by command_sha256 + token_hash (NOT job_id) so a token minted
+    for one run_ticket call can authorize the next attempt at the same
+    ticket. Atomically marks the token consumed on first hit.
+
+    `job_id` is accepted for backward compatibility but only used to scope
+    the lookup when the stored token has a non-zero job_id (strict mode).
+    Most callers should pass job_id=None or omit it.
+
+    Any mismatch (wrong command, expired, consumed) returns False without
+    leaking why.
     """
     ch = _cmd_hash(command)
     th = _hash(token_raw)
+    # Command-bound lookup (the common case). If the token row has a stricter
+    # job_id binding (>0) and the caller passed a job_id, enforce it.
     rows = get_backend().db.execute(
         """
-        SELECT id, expires_at, consumed_at
+        SELECT id, job_id, expires_at, consumed_at
         FROM approval_tokens
-        WHERE job_id = :job AND command_sha256 = :ch AND token_hash = :th
+        WHERE command_sha256 = :ch AND token_hash = :th
         """,
-        {"job": job_id, "ch": ch, "th": th},
+        {"ch": ch, "th": th},
     )
     if not rows:
         return False
     row = rows[0]
     if row.get("consumed_at"):
+        return False
+    # Strict scoping: if the stored token was minted with a specific job_id
+    # and the caller passed one, they must match.
+    stored_job = row.get("job_id") or 0
+    if stored_job > 0 and job_id is not None and stored_job != job_id:
         return False
     # expires_at is stored as ISO string or timestamp-with-tz depending on backend.
     exp_str = row["expires_at"]

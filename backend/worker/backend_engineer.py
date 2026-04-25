@@ -102,12 +102,12 @@ async def run_backend_step(
         "command": "uv",
         "args": ["run", "python", "-m", "backend.mcp.fs_mcp.server"],
         "env": _mcp_env(worktree),
-    })
+    }, client_session_timeout_seconds=60)
     sandbox_mcp = MCPServerStdio(params={
         "command": "uv",
         "args": ["run", "python", "-m", "backend.mcp.sandbox_mcp.server"],
         "env": _mcp_env(worktree),
-    })
+    }, client_session_timeout_seconds=60)
 
     async with fs_mcp, sandbox_mcp:
         agent = Agent(
@@ -144,6 +144,12 @@ _JUNK_PATTERNS = [
     "dist",
     "build",
     ".next",
+    ".coverage",
+    ".coverage.*",
+    "coverage.xml",
+    "htmlcov",
+    ".tox",
+    ".cache",
 ]
 
 
@@ -168,7 +174,17 @@ def _scrub_worktree(worktree: Path) -> list[str]:
 
 
 def commit_and_push(worktree: Path, branch: str, remote_url: str, commit_message: str) -> dict:
-    """Commit staged changes on `branch` and push to remote. Returns a small dict."""
+    """Commit staged changes on `branch` and push to remote.
+
+    Returns a dict that always has `pushed: bool`. Never raises on a non-fatal
+    failure (no changes / git rejection / push protection). The orchestrator
+    inspects the dict and emits a structured event.
+
+    Common failure modes captured in `reason`:
+      - "no changes to commit"
+      - "push rejected" (typically GitHub push-protection caught a secret)
+      - "git error" (any other git failure)
+    """
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "DevForge Bot",
            "GIT_AUTHOR_EMAIL": "bot@devforge.app",
@@ -177,11 +193,43 @@ def commit_and_push(worktree: Path, branch: str, remote_url: str, commit_message
 
     scrubbed = _scrub_worktree(worktree)
 
-    subprocess.run(["git", "add", "-A"], cwd=worktree, check=True, env=env)
+    try:
+        subprocess.run(["git", "add", "-A"], cwd=worktree, check=True, env=env,
+                       capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        return {"pushed": False, "scrubbed": scrubbed, "reason": "git error",
+                "stage": "add", "stderr": (exc.stderr or b"").decode("utf-8", "replace")[-1000:]}
+
     diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=worktree, env=env)
     if diff.returncode == 0:
         return {"pushed": False, "reason": "no changes to commit", "scrubbed": scrubbed}
-    subprocess.run(["git", "commit", "-m", commit_message], cwd=worktree, check=True, env=env)
-    subprocess.run(["git", "push", "--set-upstream", remote_url, branch],
-                   cwd=worktree, check=True, env=env, capture_output=True)
+
+    try:
+        subprocess.run(["git", "commit", "-m", commit_message],
+                       cwd=worktree, check=True, env=env, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        return {"pushed": False, "scrubbed": scrubbed, "reason": "git error",
+                "stage": "commit", "stderr": (exc.stderr or b"").decode("utf-8", "replace")[-1000:]}
+
+    try:
+        subprocess.run(["git", "push", "--set-upstream", remote_url, branch],
+                       cwd=worktree, check=True, env=env, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", "replace")
+        # GitHub push protection emits a clear marker.
+        rejected_for_secret = (
+            "GH013" in stderr
+            or "push protection" in stderr.lower()
+            or "secret detected" in stderr.lower()
+        )
+        return {
+            "pushed": False,
+            "branch": branch,
+            "scrubbed": scrubbed,
+            "reason": "push rejected by github push-protection" if rejected_for_secret else "push rejected",
+            "stage": "push",
+            "stderr": stderr[-1500:],
+            "rejected_for_secret": rejected_for_secret,
+        }
+
     return {"pushed": True, "branch": branch, "scrubbed": scrubbed}

@@ -111,7 +111,7 @@ async def run_qa(
         "command": "uv",
         "args": ["run", "python", "-m", "backend.mcp.sandbox_mcp.server"],
         "env": _mcp_env(worktree),
-    })
+    }, client_session_timeout_seconds=60)
 
     async with sandbox_mcp:
         agent = Agent(

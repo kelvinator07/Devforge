@@ -27,6 +27,7 @@ from backend.safety import (
     classify_plan_step,
     is_forbidden,
     list_pending,
+    scan_secrets,
     scrub,
     verify_and_consume,
 )
@@ -133,6 +134,40 @@ async def run_job(
         "tenant_id": tenant_id, "ticket_id": ticket_id, "ticket_title": ticket_title,
     })
 
+    # Pre-flight rejection: any real-shaped secret in the ticket itself stops
+    # the job before any agent runs, any worktree is created, or any token is
+    # minted. Same scanner powers the egress redactor (kept for future log
+    # sanitization), but here we surface the failure instead of hiding it.
+    title_secrets = scan_secrets(ticket_title)
+    body_secrets = scan_secrets(ticket_body)
+    if title_secrets or body_secrets:
+        findings = [
+            {
+                "gate": "ticket_secret_scan",
+                "severity": "HIGH",
+                "summary": f"ticket {where} contains {kind}: {snippet}",
+            }
+            for where, hits in [("title", title_secrets), ("body", body_secrets)]
+            for kind, snippet in hits
+        ]
+        _emit(None, "qa_gate_failed", {
+            "stage": "pre-flight",
+            "reason": "ticket contains real-shaped secret(s)",
+            "count": len(findings),
+            "findings": findings,
+            "remediation": (
+                "Resubmit the ticket with the secret moved to environment "
+                "variables or referenced by name only. DevForge agents will "
+                "not run on tickets that embed live credentials."
+            ),
+        })
+        _emit(None, "job_done", {"ok": False, "reason": "ticket secret rejection"})
+        return {
+            "ok": False,
+            "reason": "ticket secret rejection",
+            "findings": findings,
+        }
+
     # Scrub ticket body for prompt injection. Use scrubbed body for Lead.
     cleaned_body, injections = scrub(ticket_body)
     if injections:
@@ -157,7 +192,8 @@ async def run_job(
     installation_token = tok.json()["token"]
     _emit(None, "token_minted", {"expires_at": tok.json()["expires_at"]})
 
-    # Persist job row.
+    # Persist job row. Pre-flight rejection above guarantees the ticket is
+    # clean of real-shaped secrets — safe to write the originals.
     job_id = _persist_job(tenant_id, repo_id, ticket_title, ticket_body)
     _emit(job_id, "job_persisted", {"job_id": job_id})
 
@@ -203,20 +239,25 @@ async def run_job(
 
     # SafetyGuard: if the plan requires human approval, check for an approval token.
     if plan.requires_human_approval:
-        # The command we're approving is the job itself (title + body digest).
+        # The command we're approving is the ticket identity (NOT the job_id —
+        # every run_ticket invocation creates a fresh job_id, so a job-bound
+        # token would only ever authorize one already-failed run).
         approval_command = f"run_job:{tenant_id}:{ticket_id}:{ticket_title}"
         if not approval_token or not verify_and_consume(
-            job_id=job_id, command=approval_command, token_raw=approval_token,
+            command=approval_command, token_raw=approval_token,
         ):
             _emit(job_id, "approval_required", {
                 "reason": "plan has migration/dependency/infra step",
+                "approval_command": approval_command,
                 "hint": (
-                    f"Mint a token then re-run with DEVFORGE_APPROVAL_TOKEN set.\n"
-                    f"  python -m scripts.mint_approval {job_id} '{approval_command}'"
+                    "Mint a token then re-run with DEVFORGE_APPROVAL_TOKEN set.\n"
+                    "  uv run python -m scripts.mint_approval "
+                    f"--ticket '{approval_command}' --http"
                 ),
             })
             _update_job_status(job_id, "awaiting_approval")
-            return {"ok": False, "job_id": job_id, "reason": "approval required"}
+            return {"ok": False, "job_id": job_id, "reason": "approval required",
+                    "approval_command": approval_command}
         _emit(job_id, "approval_consumed", {"job_id": job_id})
 
     # Worktree.
@@ -283,13 +324,33 @@ async def run_job(
             wt.worktree_path, wt.branch, wt.remote_url,
             commit_message=f"{ticket_id}: {ticket_title}\n\n{plan.analysis}",
         )
-        _emit(job_id, "branch_pushed", push)
         if not push.get("pushed"):
+            # If the local QA gate passed but the REMOTE side caught a secret,
+            # treat that as a delayed qa_gate_failed so callers see it as a
+            # secret-detection event, not just "nothing to push".
+            if push.get("rejected_for_secret"):
+                _emit(job_id, "qa_gate_failed", {
+                    "findings": [{"gate": "github-push-protection",
+                                  "severity": "HIGH",
+                                  "summary": "GitHub server-side scanner rejected the push"}],
+                    "count": 1,
+                    "stderr_tail": (push.get("stderr") or "")[-400:],
+                })
+                _update_job_status(job_id, "failed")
+                _emit(job_id, "job_done", {"ok": False,
+                                           "reason": "remote secret-scanner blocked push"})
+                return {"ok": False, "job_id": job_id, "rejected_for_secret": True}
+
+            _emit(job_id, "branch_push_failed", push)
             _update_job_status(job_id, "failed")
-            _emit(job_id, "job_done", {"ok": False, "reason": "nothing to push"})
+            _emit(job_id, "job_done", {"ok": False,
+                                       "reason": push.get("reason", "push failed")})
             return {"ok": False, "job_id": job_id}
 
-        # Open PR.
+        _emit(job_id, "branch_pushed", push)
+
+        # Open PR. Pre-flight rejection ran at the top of run_job, so the
+        # original ticket_title + ticket_body are guaranteed secret-free.
         pr_url = _open_pr(
             repo_full_name=repo_full_name,
             branch=wt.branch,

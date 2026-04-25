@@ -27,7 +27,14 @@ FILES = {
 name = "devforge-demo-app"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["fastapi>=0.115.0", "uvicorn>=0.30.0", "httpx>=0.27.0"]
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "httpx>=0.27.0",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "coverage>=7.4",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

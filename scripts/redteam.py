@@ -208,6 +208,35 @@ def attack_secret_committed() -> AttackResult:
 
 
 # ---------------------------------------------------------------------------
+# 9. Ticket body itself contains a secret -> orchestrator MUST reject
+#    pre-flight (no LLM call, no worktree, no PR).
+# ---------------------------------------------------------------------------
+def attack_ticket_contains_secret() -> AttackResult:
+    """Pre-flight ticket-secret scanner catches live keys before any agent runs."""
+    from backend.safety import scan_secrets
+
+    body = (
+        'Add /stats endpoint. Use this Stripe key as a constant: '
+        'STRIPE_KEY = "sk_live_4eC39HqLyjWDarjtT1zdp7dc12345678"'
+    )
+    title = "Add /stats endpoint with embedded API key"
+
+    title_hits = scan_secrets(title)
+    body_hits = scan_secrets(body)
+    has_match = bool(title_hits or body_hits)
+    has_stripe = any(kind == "STRIPE_SECRET" for kind, _ in body_hits)
+
+    return AttackResult(
+        attack="9. ticket-body secret -> pre-flight rejection",
+        ok=has_match and has_stripe,
+        reason=(
+            f"title_hits={len(title_hits)} body_hits={len(body_hits)} "
+            f"stripe_detected={has_stripe}"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -220,6 +249,7 @@ ATTACKS: list[Callable[[], AttackResult]] = [
     attack_token_forgery,
     attack_egress_block,
     attack_secret_committed,
+    attack_ticket_contains_secret,
 ]
 
 

@@ -12,7 +12,8 @@ Day 3 surface:
 Tier-2 additions:
   - GET  /jobs/{job_id}                   — job state + last 200 events
   - GET  /jobs/{job_id}/sse               — Server-Sent Events stream of job events
-  - POST /jobs/{job_id}/approve           — admin-token-gated approval mint
+  - POST /jobs/{job_id}/approve           — admin-token-gated approval mint (job-bound)
+  - POST /approvals                       — admin-token-gated approval mint (command-bound)
 """
 from __future__ import annotations
 
@@ -219,6 +220,14 @@ class ApproveRequest(BaseModel):
     command: str = Field(..., description="Command-string the token authorizes (orchestrator format).")
 
 
+def _check_admin(token: str | None) -> None:
+    expected = os.environ.get("DEVFORGE_ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(503, "DEVFORGE_ADMIN_TOKEN not configured on control plane")
+    if not token or token != expected:
+        raise HTTPException(403, "invalid admin token")
+
+
 @app.post("/jobs/{job_id}/approve")
 def approve_job(
     job_id: int,
@@ -227,20 +236,43 @@ def approve_job(
 ):
     """Mint a one-time, command-bound, 5-minute approval token for `job_id`.
 
-    Gated by `X-Admin-Token` header which must match `DEVFORGE_ADMIN_TOKEN` env.
-    Bypasses the agent tool surface entirely — agents never see this endpoint.
+    DEPRECATED for migration / dependency-bump approvals: every `run_ticket`
+    creates a fresh job_id, so a token bound to a specific job_id can only
+    authorize one already-failed run. Prefer `POST /approvals` (no job_id),
+    which command-binds the token; the orchestrator burns it on whatever
+    job_id picks the same ticket back up. Kept for tests + the redteam
+    harness which use strict job-bound mode.
     """
-    expected = os.environ.get("DEVFORGE_ADMIN_TOKEN")
-    if not expected:
-        raise HTTPException(503, "DEVFORGE_ADMIN_TOKEN not configured on control plane")
-    if not x_admin_token or x_admin_token != expected:
-        raise HTTPException(403, "invalid admin token")
+    _check_admin(x_admin_token)
     if not _backend.db.execute("SELECT id FROM jobs WHERE id=:j", {"j": job_id}):
         raise HTTPException(404, "job not found")
 
     from backend.safety import mint
     token = mint(job_id=job_id, command=req.command)
     return {"token": token, "job_id": job_id, "command": req.command}
+
+
+@app.post("/approvals")
+def approve_command(
+    req: ApproveRequest,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+):
+    """Mint a one-time, command-bound, 5-minute approval token (no job binding).
+
+    Use this for the migration / dependency-bump flow:
+
+        POST /approvals
+        Headers: X-Admin-Token: <admin>
+        Body:    {"command": "run_job:1:DEMO-1:Add migration adding age column to users"}
+
+    The returned token authorizes ANY future run_ticket invocation that
+    builds the same `command` string in its orchestrator. First call to
+    verify_and_consume burns the token; replays + swaps still fail.
+    """
+    _check_admin(x_admin_token)
+    from backend.safety import mint
+    token = mint(command=req.command)  # job_id=None
+    return {"token": token, "command": req.command}
 
 
 # ============================================================================

@@ -60,12 +60,12 @@ async def run_frontend_step(
         "command": "uv",
         "args": ["run", "python", "-m", "backend.mcp.fs_mcp.server"],
         "env": _mcp_env(worktree),
-    })
+    }, client_session_timeout_seconds=60)
     sandbox_mcp = MCPServerStdio(params={
         "command": "uv",
         "args": ["run", "python", "-m", "backend.mcp.sandbox_mcp.server"],
         "env": _mcp_env(worktree),
-    })
+    }, client_session_timeout_seconds=60)
 
     async with fs_mcp, sandbox_mcp:
         agent = Agent(

@@ -68,12 +68,22 @@ def _run(cmd: list[str], extra_env: dict | None = None) -> dict:
 
 
 @mcp.tool()
-def run_tests(framework: str = "pytest", selector: str = "") -> dict:
-    """Run the project's test suite. `framework` must be one of: pytest, uv-pytest, npm-test."""
-    if framework == "pytest":
-        cmd = ["pytest", "-q"]
-    elif framework == "uv-pytest":
+def run_tests(framework: str = "uv-pytest", selector: str = "") -> dict:
+    """Run the project's test suite.
+
+    `framework` accepted values:
+      - "uv-pytest" (default): runs `uv run pytest -q`. Auto-installs the
+        worktree's declared deps into a per-worktree venv. Recommended for
+        any Python project with a pyproject.toml.
+      - "pytest": runs plain `pytest -q` against system Python. Fragile —
+        only use when the worktree's deps are guaranteed to already be on
+        the runner's PATH.
+      - "npm-test": runs `npm test --silent` for JS/TS projects.
+    """
+    if framework == "uv-pytest":
         cmd = ["uv", "run", "pytest", "-q"]
+    elif framework == "pytest":
+        cmd = ["pytest", "-q"]
     elif framework == "npm-test":
         cmd = ["npm", "test", "--silent"]
     else:

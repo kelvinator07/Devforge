@@ -40,6 +40,45 @@ def split_sql(sql: str) -> list[str]:
     return [s for s in no_line_comments.split(";") if s.strip()]
 
 
+def _sqlite_drop_not_null(conn: sqlite3.Connection, table: str, column: str) -> None:
+    """SQLite has no ALTER COLUMN DROP NOT NULL; rebuild the table.
+
+    Preserves data, indexes, and the FK that points at jobs.id.
+    """
+    # Check whether the column still has NOT NULL — idempotent.
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    target = next((c for c in cols if c[1] == column), None)
+    if target is None or target[3] == 0:  # notnull flag at index 3
+        print(f"   (sqlite) {table}.{column}: already nullable, skipping")
+        return
+
+    # Inline rebuild: only known shape for approval_tokens. We reuse this
+    # function for that one case; if more tables need it later, parameterize.
+    if table != "approval_tokens" or column != "job_id":
+        raise RuntimeError(
+            f"sqlite drop-not-null only handles approval_tokens.job_id; got {table}.{column}"
+        )
+
+    print(f"   (sqlite) rebuilding {table} to drop NOT NULL on {column}")
+    conn.executescript("""
+        CREATE TABLE approval_tokens__new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id          INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+            command_sha256  TEXT NOT NULL,
+            token_hash      TEXT NOT NULL,
+            expires_at      TEXT NOT NULL,
+            consumed_at     TEXT,
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO approval_tokens__new
+            (id, job_id, command_sha256, token_hash, expires_at, consumed_at, created_at)
+        SELECT id, job_id, command_sha256, token_hash, expires_at, consumed_at, created_at
+        FROM approval_tokens;
+        DROP TABLE approval_tokens;
+        ALTER TABLE approval_tokens__new RENAME TO approval_tokens;
+    """)
+
+
 def apply_local(sql_files: list[Path]) -> None:
     backend = get_backend()
     if not isinstance(backend.db, SQLiteDB):
@@ -54,6 +93,14 @@ def apply_local(sql_files: list[Path]) -> None:
             for stmt in split_sql(sql):
                 preview = stmt.strip().splitlines()[0][:80]
                 print(f"   > {preview}")
+                # SQLite-only: synthesize the equivalent of ALTER COLUMN ... DROP NOT NULL.
+                m = re.match(
+                    r"\s*ALTER\s+TABLE\s+(\w+)\s+ALTER\s+COLUMN\s+(\w+)\s+DROP\s+NOT\s+NULL\s*",
+                    stmt, re.IGNORECASE,
+                )
+                if m:
+                    _sqlite_drop_not_null(conn, m.group(1), m.group(2))
+                    continue
                 conn.execute(stmt)
         conn.commit()
 
