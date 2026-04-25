@@ -38,8 +38,36 @@ _openrouter_client: AsyncOpenAI | None = None
 
 
 def load_model_config() -> dict:
+    """Load per-agent model + fallback config.
+
+    Precedence (highest first):
+      1. DEVFORGE_MODEL_<AGENT_KEY>  (e.g. DEVFORGE_MODEL_ENGINEERING_LEAD)
+      2. DEVFORGE_MODEL_DEFAULT      (overrides every unset agent)
+      3. models.yaml on disk         (committed defaults)
+
+    Same precedence applies to fallback chains via
+    DEVFORGE_MODEL_<AGENT_KEY>_FALLBACK (comma-separated). Empty value clears
+    the fallback chain.
+    """
     with open(MODELS_YAML) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+
+    default_model = os.environ.get("DEVFORGE_MODEL_DEFAULT", "").strip()
+    default_fallback_env = os.environ.get("DEVFORGE_MODEL_DEFAULT_FALLBACK")
+
+    for agent_key in list(cfg.keys()):
+        env_model = os.environ.get(f"DEVFORGE_MODEL_{agent_key.upper()}", "").strip()
+        if env_model:
+            cfg[agent_key]["model"] = env_model
+        elif default_model:
+            cfg[agent_key]["model"] = default_model
+
+        env_fallback = os.environ.get(f"DEVFORGE_MODEL_{agent_key.upper()}_FALLBACK")
+        chosen_fb = env_fallback if env_fallback is not None else default_fallback_env
+        if chosen_fb is not None:
+            cfg[agent_key]["fallback"] = [s.strip() for s in chosen_fb.split(",") if s.strip()]
+
+    return cfg
 
 
 def configure_openrouter() -> AsyncOpenAI:
