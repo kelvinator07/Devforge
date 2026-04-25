@@ -132,11 +132,14 @@ def main() -> None:
     tenant_id = int(sys.argv[1])
     api = os.environ.get("CONTROL_PLANE_API", "http://localhost:8001")
 
-    t = httpx.get(f"{api}/tenants/{tenant_id}", timeout=15.0)
+    from backend.common import admin_headers
+    cp_headers = admin_headers()
+    t = httpx.get(f"{api}/tenants/{tenant_id}", headers=cp_headers, timeout=15.0)
     t.raise_for_status()
     repo = t.json()["repos"][0]["full_name"]
 
-    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token", timeout=30.0)
+    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token",
+                    headers=cp_headers, timeout=30.0)
     tok.raise_for_status()
     token = tok.json()["token"]
 

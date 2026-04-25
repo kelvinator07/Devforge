@@ -13,12 +13,13 @@ dependencies = [
     "httpx>=0.27.0",
     "tenacity>=9.0.0",
     "python-dotenv>=1.0.0",
-    # Control plane (FastAPI + GitHub App)
+    # Control plane (FastAPI + GitHub App + Clerk)
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
     "mangum>=0.19.0",
     "pyjwt[crypto]>=2.9.0",
     "cryptography>=43.0.0",
+    "fastapi-clerk-auth>=0.0.7",
     # MCP (Day 6)
     "mcp>=1.0.0",
 ]

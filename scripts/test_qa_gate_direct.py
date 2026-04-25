@@ -50,11 +50,14 @@ def main() -> None:
 
     # Reuse the orchestrator's worktree manager — we want exactly the same
     # filesystem layout the agents work in.
-    t = httpx.get(f"{api}/tenants/{tenant_id}", timeout=15.0)
+    from backend.common import admin_headers
+    cp_headers = admin_headers()
+    t = httpx.get(f"{api}/tenants/{tenant_id}", headers=cp_headers, timeout=15.0)
     t.raise_for_status()
     repo_full_name = t.json()["repos"][0]["full_name"]
 
-    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token", timeout=30.0)
+    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token",
+                    headers=cp_headers, timeout=30.0)
     tok.raise_for_status()
     installation_token = tok.json()["token"]
 

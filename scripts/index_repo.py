@@ -28,8 +28,11 @@ def main() -> None:
 
     api = os.environ.get("CONTROL_PLANE_API", "http://localhost:8001")
 
+    from backend.common import admin_headers
+    cp_headers = admin_headers()
+
     print(f"[index] fetching tenant {tenant_id} from {api} ...", flush=True)
-    t = httpx.get(f"{api}/tenants/{tenant_id}", timeout=15.0)
+    t = httpx.get(f"{api}/tenants/{tenant_id}", headers=cp_headers, timeout=15.0)
     t.raise_for_status()
     tenant = t.json()
     if not tenant.get("repos"):
@@ -37,7 +40,8 @@ def main() -> None:
     repo_full_name = tenant["repos"][0]["full_name"]
     print(f"[index] repo: {repo_full_name}", flush=True)
 
-    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token", timeout=30.0)
+    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token",
+                    headers=cp_headers, timeout=30.0)
     tok.raise_for_status()
     token = tok.json()["token"]
     print(f"[index] installation token minted, expires {tok.json()['expires_at']}", flush=True)

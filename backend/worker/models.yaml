@@ -3,26 +3,26 @@
 # Model strings are OpenRouter slugs (provider/model-id).
 
 engineering_lead:
-  model: openai/gpt-4o
+  model: openai/gpt-5.4-nano
   fallback:
-    - openai/gpt-5
+    - openai/gpt-5-mini
     - anthropic/claude-sonnet-4-6
 
 backend_engineer:
-  model: openai/gpt-4o
+  model: openai/gpt-5.4-nano
   fallback:
-    - openai/gpt-5
+    - openai/gpt-5-mini
     - anthropic/claude-sonnet-4-6
 
 frontend_engineer:
-  model: openai/gpt-4o
+  model: openai/gpt-5.4-nano
   fallback:
-    - openai/gpt-5
+    - openai/gpt-5-mini
     - anthropic/claude-sonnet-4-6
 
 qa_engineer:
-  # Tool-heavy work; Haiku is cost-optimized and plenty capable for gate-checks.
-  model: openai/gpt-4o
+  # Tool-heavy work; GPT 5 Mini is cost-optimized and plenty capable for gate-checks.
+  model: openai/gpt-5-mini
   fallback:
-    - openai/gpt-5
+    - openai/gpt-5.4-nano
     - anthropic/claude-sonnet-4-6

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     repo_id         BIGINT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     ticket_title    TEXT NOT NULL,
     ticket_body     TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'queued',  -- queued | running | awaiting_approval | pr_opened | failed
+    status          TEXT NOT NULL DEFAULT 'queued',  -- queued | running | awaiting_approval | approval_superseded | pr_opened | failed | refused
     pr_url          TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()

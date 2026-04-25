@@ -57,19 +57,23 @@ def main() -> None:
     }
 
     print(f"\nPOST {api}/tenants/onboard")
-    r = httpx.post(f"{api}/tenants/onboard", json=payload, timeout=30.0)
+    from backend.common import admin_headers
+    cp_headers = admin_headers()
+    r = httpx.post(f"{api}/tenants/onboard", json=payload,
+                   headers=cp_headers, timeout=30.0)
     print(f"  status: {r.status_code}")
     print(f"  body:   {r.text}")
     r.raise_for_status()
 
     tenant_id = r.json()["tenant_id"]
     print(f"\nVerifying via GET /tenants/{tenant_id} ...")
-    r2 = httpx.get(f"{api}/tenants/{tenant_id}", timeout=15.0)
+    r2 = httpx.get(f"{api}/tenants/{tenant_id}", headers=cp_headers, timeout=15.0)
     r2.raise_for_status()
     print(f"  tenant: {r2.json()}")
 
     print(f"\nMinting a fresh installation token ...")
-    r3 = httpx.get(f"{api}/tenants/{tenant_id}/installation-token", timeout=30.0)
+    r3 = httpx.get(f"{api}/tenants/{tenant_id}/installation-token",
+                   headers=cp_headers, timeout=30.0)
     r3.raise_for_status()
     token = r3.json()["token"]
     print(f"  expires_at: {r3.json()['expires_at']}")

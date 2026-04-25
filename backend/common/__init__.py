@@ -25,3 +25,7 @@ def get_backend():
         from .local_backend import LocalBackend
         return LocalBackend()
     raise ValueError(f"DEVFORGE_BACKEND must be 'local' or 'aws', got: {mode!r}")
+
+
+# Convenience re-export so callers can do `from backend.common import admin_headers`.
+from ._http import admin_headers  # noqa: E402

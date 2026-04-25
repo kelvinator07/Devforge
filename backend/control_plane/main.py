@@ -25,7 +25,8 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from mangum import Mangum
 from pydantic import BaseModel, Field
@@ -46,6 +47,114 @@ app = FastAPI(title="DevForge Control Plane", version="0.1.0")
 _backend = get_backend()
 
 
+# ============================================================================
+# Dual auth: Clerk JWT (frontend) OR X-Admin-Token (CLI) OR DEVFORGE_AUTH_DISABLED.
+# /health is open. /approvals + /jobs/{id}/approve stay admin-token-only.
+# ============================================================================
+
+_clerk_jwks_url = os.environ.get("CLERK_JWKS_URL", "").strip()
+_clerk_guard = None
+if _clerk_jwks_url:
+    try:
+        from fastapi_clerk_auth import ClerkConfig, ClerkHTTPBearer  # type: ignore
+        _clerk_guard = ClerkHTTPBearer(ClerkConfig(jwks_url=_clerk_jwks_url))
+        logger.info("Clerk JWT validation enabled via %s", _clerk_jwks_url)
+    except Exception as exc:  # pragma: no cover - never break the app on bad clerk wiring
+        logger.warning("Clerk JWT init failed (%s); continuing without it", exc)
+
+
+def _auth_disabled_local() -> bool:
+    """`DEVFORGE_AUTH_DISABLED=1` lets local CLI dev bypass auth entirely.
+
+    Refuses to engage when DEVFORGE_BACKEND=aws — escape hatch must never
+    open up production.
+    """
+    if os.environ.get("DEVFORGE_BACKEND", "local") != "local":
+        return False
+    return os.environ.get("DEVFORGE_AUTH_DISABLED", "").strip() in ("1", "true", "yes")
+
+
+def _admin_token_matches(token: str | None) -> bool:
+    expected = os.environ.get("DEVFORGE_ADMIN_TOKEN")
+    return bool(expected and token and token == expected)
+
+
+def _check_admin(token: str | None) -> None:
+    """Strict admin-only check. Used by /approvals and /jobs/{id}/approve."""
+    expected = os.environ.get("DEVFORGE_ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(503, "DEVFORGE_ADMIN_TOKEN not configured on control plane")
+    if not _admin_token_matches(token):
+        raise HTTPException(403, "invalid admin token")
+
+
+def dual_auth(
+    authorization: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict:
+    """Allow Clerk JWT OR admin token OR auth-disabled local dev.
+
+    Returns a dict describing who the caller is (for logging only — we
+    don't enforce per-tenant scoping in v1).
+    """
+    if _admin_token_matches(x_admin_token):
+        return {"actor": "admin", "via": "X-Admin-Token"}
+
+    if _auth_disabled_local():
+        return {"actor": "anonymous", "via": "DEVFORGE_AUTH_DISABLED"}
+
+    if authorization and authorization.lower().startswith("bearer "):
+        if _clerk_guard is None:
+            raise HTTPException(
+                503,
+                "Clerk JWT validation not configured (set CLERK_JWKS_URL or "
+                "DEVFORGE_AUTH_DISABLED=1 for local dev)",
+            )
+        token = authorization.split(" ", 1)[1].strip()
+        try:
+            # fastapi-clerk-auth >=0.0.7 keeps the JWT decoder as a private
+            # method (`_decode_token`). The public `__call__` only works
+            # when called as a FastAPI Depends with a real Request, which
+            # we don't have here. Calling _decode_token directly is the
+            # supported escape hatch (returns dict on success, None on
+            # any verification failure when debug_mode=False).
+            decoded = _clerk_guard._decode_token(token)  # noqa: SLF001
+        except Exception as exc:
+            raise HTTPException(401, f"Clerk JWT decode error: {exc}") from exc
+        if decoded is None:
+            raise HTTPException(
+                401,
+                "invalid Clerk JWT (signature/audience/issuer/expiry failed). "
+                "Confirm CLERK_JWKS_URL points at YOUR Clerk app, not the "
+                ".env.example placeholder.",
+            )
+        return {"actor": "user", "via": "clerk", "sub": decoded.get("sub")}
+
+    raise HTTPException(
+        401,
+        "missing credentials: send X-Admin-Token or Authorization: Bearer <clerk-jwt>, "
+        "or set DEVFORGE_AUTH_DISABLED=1 for local dev",
+    )
+
+
+# ============================================================================
+# CORS: allow the local frontend dev origin + a configurable production origin.
+# ============================================================================
+
+_allowed_origins = [o.strip() for o in os.environ.get(
+    "DEVFORGE_CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000",
+).split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-Id"],
+)
+
+
 class OnboardRequest(BaseModel):
     tenant_name: str = Field(..., min_length=1, max_length=128)
     github_owner: str = Field(..., min_length=1, max_length=128)
@@ -64,7 +173,7 @@ def health():
 
 
 @app.post("/tenants/onboard")
-def onboard_tenant(req: OnboardRequest):
+def onboard_tenant(req: OnboardRequest, _auth: dict = Depends(dual_auth)):
     existing = _backend.db.execute(
         "SELECT id FROM tenants WHERE github_installation_id = :inst",
         {"inst": req.installation_id},
@@ -98,7 +207,7 @@ def onboard_tenant(req: OnboardRequest):
 
 
 @app.get("/tenants/{tenant_id}")
-def get_tenant(tenant_id: int):
+def get_tenant(tenant_id: int, _auth: dict = Depends(dual_auth)):
     rows = _backend.db.execute(
         """
         SELECT t.id, t.name, t.github_owner, t.github_installation_id, t.created_at,
@@ -129,7 +238,8 @@ def get_tenant(tenant_id: int):
 # ============================================================================
 
 @app.get("/jobs/{job_id}")
-def get_job(job_id: int, since_event_id: int = 0, limit: int = 200):
+def get_job(job_id: int, since_event_id: int = 0, limit: int = 200,
+            _auth: dict = Depends(dual_auth)):
     """Snapshot of a job + its events (oldest first, capped at `limit`)."""
     rows = _backend.db.execute(
         "SELECT id, tenant_id, ticket_title, status, pr_url, created_at FROM jobs WHERE id=:j",
@@ -220,12 +330,74 @@ class ApproveRequest(BaseModel):
     command: str = Field(..., description="Command-string the token authorizes (orchestrator format).")
 
 
-def _check_admin(token: str | None) -> None:
-    expected = os.environ.get("DEVFORGE_ADMIN_TOKEN")
-    if not expected:
-        raise HTTPException(503, "DEVFORGE_ADMIN_TOKEN not configured on control plane")
-    if not token or token != expected:
-        raise HTTPException(403, "invalid admin token")
+# `_check_admin` is defined near the dual_auth helper above. Keep this section
+# focused on the approval mint endpoints + the new list endpoints.
+
+
+@app.get("/jobs")
+def list_jobs(tenant_id: int | None = None, limit: int = 50,
+              _auth: dict = Depends(dual_auth)):
+    """List recent jobs (newest first). Optional ?tenant_id= filter."""
+    limit = max(1, min(limit, 200))
+    if tenant_id is None:
+        rows = _backend.db.execute(
+            """
+            SELECT id, tenant_id, ticket_title, status, pr_url, created_at
+            FROM jobs
+            ORDER BY id DESC
+            LIMIT :lim
+            """,
+            {"lim": limit},
+        )
+    else:
+        rows = _backend.db.execute(
+            """
+            SELECT id, tenant_id, ticket_title, status, pr_url, created_at
+            FROM jobs
+            WHERE tenant_id = :t
+            ORDER BY id DESC
+            LIMIT :lim
+            """,
+            {"t": tenant_id, "lim": limit},
+        )
+    return {"jobs": rows}
+
+
+@app.get("/approvals/pending")
+def list_pending_approvals(_auth: dict = Depends(dual_auth)):
+    """Return all jobs with status='awaiting_approval' along with their
+    derived approval_command (extracted from the latest approval_required
+    event for each job). The frontend uses this to populate the approvals
+    queue.
+    """
+    pending_jobs = _backend.db.execute(
+        """
+        SELECT id, tenant_id, ticket_title, ticket_body, created_at
+        FROM jobs
+        WHERE status = 'awaiting_approval'
+        ORDER BY id DESC
+        """
+    )
+    out: list[dict] = []
+    for j in pending_jobs:
+        evs = _backend.db.execute(
+            """
+            SELECT payload FROM job_events
+            WHERE job_id = :j AND event = 'approval_required'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            {"j": j["id"]},
+        )
+        approval_command = None
+        if evs:
+            try:
+                payload = json.loads(evs[0]["payload"] or "{}")
+                approval_command = payload.get("approval_command")
+            except Exception:
+                pass
+        out.append({**j, "approval_command": approval_command})
+    return {"pending": out}
 
 
 @app.post("/jobs/{job_id}/approve")
@@ -280,7 +452,7 @@ def approve_command(
 # ============================================================================
 
 @app.get("/tenants/{tenant_id}/installation-token")
-def get_installation_token(tenant_id: int):
+def get_installation_token(tenant_id: int, _auth: dict = Depends(dual_auth)):
     rows = _backend.db.execute(
         "SELECT github_installation_id FROM tenants WHERE id = :tid",
         {"tid": tenant_id},

@@ -117,6 +117,46 @@ def _update_job_status(job_id: int, status: str, pr_url: str | None = None) -> N
         )
 
 
+def _supersede_prior_awaiting(
+    tenant_id: int, approval_command: str, current_job_id: int
+) -> list[int]:
+    """Mark all prior 'awaiting_approval' jobs that share this approval_command
+    as 'approval_superseded'. Returns the list of job_ids that were updated.
+
+    Approval tokens are ticket-bound, so a single mint+consume can authorize
+    *any* future run with the same approval_command. Without this sweep, the
+    original awaiting_approval row stays on /approvals/pending forever.
+    """
+    db = get_backend().db
+    candidates = db.execute(
+        "SELECT id FROM jobs "
+        "WHERE tenant_id = :t AND status = 'awaiting_approval' AND id != :j",
+        {"t": tenant_id, "j": current_job_id},
+    )
+    superseded: list[int] = []
+    for row in candidates:
+        prior_id = row["id"]
+        evs = db.execute(
+            "SELECT payload FROM job_events "
+            "WHERE job_id = :j AND event = 'approval_required' "
+            "ORDER BY id DESC LIMIT 1",
+            {"j": prior_id},
+        )
+        if not evs:
+            continue
+        try:
+            payload = json.loads(evs[0]["payload"] or "{}")
+        except Exception:
+            continue
+        if payload.get("approval_command") == approval_command:
+            db.execute(
+                "UPDATE jobs SET status='approval_superseded' WHERE id=:j",
+                {"j": prior_id},
+            )
+            superseded.append(prior_id)
+    return superseded
+
+
 # ------------- main entrypoint -------------------------------------------
 
 async def run_job(
@@ -176,7 +216,9 @@ async def run_job(
         })
 
     # Tenant lookup + installation token mint.
-    t = httpx.get(f"{api}/tenants/{tenant_id}", timeout=15.0)
+    from backend.common import admin_headers
+    cp_headers = admin_headers()
+    t = httpx.get(f"{api}/tenants/{tenant_id}", headers=cp_headers, timeout=15.0)
     t.raise_for_status()
     tenant = t.json()
     if not tenant.get("repos"):
@@ -187,7 +229,8 @@ async def run_job(
     repo_id = repo["id"]
     _emit(None, "tenant_fetched", {"repo": repo_full_name})
 
-    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token", timeout=30.0)
+    tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token",
+                    headers=cp_headers, timeout=30.0)
     tok.raise_for_status()
     installation_token = tok.json()["token"]
     _emit(None, "token_minted", {"expires_at": tok.json()["expires_at"]})
@@ -259,6 +302,10 @@ async def run_job(
             return {"ok": False, "job_id": job_id, "reason": "approval required",
                     "approval_command": approval_command}
         _emit(job_id, "approval_consumed", {"job_id": job_id})
+        prior = _supersede_prior_awaiting(tenant_id, approval_command, job_id)
+        if prior:
+            _emit(job_id, "prior_approvals_superseded",
+                  {"superseded_job_ids": prior})
 
     # Worktree.
     wt: Worktree = prepare_worktree(tenant_id, repo_full_name, installation_token)
