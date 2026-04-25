@@ -1,9 +1,9 @@
 """DevForge worker entrypoint.
 
-Day 2 scope: minimal smoke test. Configures the OpenAI-compatible client
+Smoke test scope: minimal smoke test. Configures the OpenAI-compatible client
 to talk to OpenRouter, asks one agent to say hello, prints the result.
 
-Day 5+ scope: full 4-agent crew orchestration (Lead -> Backend + Frontend -> QA).
+Full agents scope: full 4-agent crew orchestration (Lead -> Backend + Frontend -> QA).
 
 Runs locally (`uv run python -m backend.worker.crew`) or as a Fargate task. The
 OpenRouter API key is read via backend.common.secrets so the same code works in
@@ -152,7 +152,7 @@ async def smoke_test() -> None:
         name="SmokeAgent",
         instructions=(
             "You are a smoke test. Reply with exactly the phrase "
-            "'DevForge Day 2 OK' and nothing else."
+            "'DevForge Smoke Test OK' and nothing else."
         ),
         model=openrouter_model(slug),
     )

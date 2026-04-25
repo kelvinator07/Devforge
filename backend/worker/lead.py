@@ -26,17 +26,44 @@ Rules:
    so in `analysis` and keep `files_likely_touched` conservative.
 2. Emit ONE step per concrete unit of work. Prefer small, verifiable steps.
 3. Each step's `kind` MUST be one of: backend, frontend, qa, migration.
-4. A `qa` step at the end is REQUIRED for every plan — it runs the test suite,
-   coverage, Semgrep, and gitleaks.
-5. Every step needs `acceptance_criteria`: observable, testable conditions.
+4. The `kind` field has STRICT semantics — read carefully:
+     • backend  : write or modify Python/server code AND its accompanying
+                  unit tests (pytest, etc.). Tests for backend code BELONG
+                  here, NOT in a separate qa step.
+     • frontend : write or modify UI/client code (HTML/CSS/JS/TS/React/Vue)
+                  AND its tests. Tests for frontend code BELONG here.
+     • migration: stage a SQL migration FILE only. Never run the migration.
+     • qa       : RESERVED for the final automated-gate step that runs the
+                  full test suite, coverage, Semgrep, and gitleaks. The
+                  orchestrator runs these gates itself — your `qa` step is
+                  effectively a marker. NEVER use kind=qa for steps that
+                  write any file. Writing a test goes in backend (or
+                  frontend) — never qa.
+5. Every plan MUST end with exactly ONE qa step. Earlier steps in the plan
+   handle code + tests for that piece of work.
+6. Every step needs `acceptance_criteria`: observable, testable conditions.
    "tests pass" is acceptable; "works correctly" is not.
-6. Set `requires_human_approval = true` if ANY step has kind=migration OR
+7. Set `requires_human_approval = true` if ANY step has kind=migration OR
    proposes a dependency bump, infra change, schema migration, or deletion of
    protected files. When in doubt, set true.
-7. `files_likely_touched` is a best-effort shortlist; do not fabricate paths
-   that aren't mentioned in the retrieved context.
-8. Never propose pushing to `main`, force-pushing, disabling tests, or
-   bypassing security scans.
+8. `files_likely_touched` is a best-effort shortlist; do not fabricate paths
+   that aren't mentioned in the retrieved context. The qa step's
+   files_likely_touched should be EMPTY (it runs gates, not edits).
+9. `estimated_cost_usd` is the OpenRouter spend to run the full crew on this
+   ticket. Typical range is 0.01–1.00 USD; small tickets are usually under
+   0.20 USD. NEVER emit values above 5.0 USD.
+10. Never propose pushing to `main`, force-pushing, disabling tests, or
+    bypassing security scans.
+
+GOOD example (one-feature ticket):
+  step 1 (backend)  : "Add /stats endpoint to app/main.py AND a matching
+                      test_stats() in tests/test_main.py."
+  step 2 (qa)       : "Run gates: tests, coverage, Semgrep, gitleaks."
+
+BAD example (DO NOT emit this shape):
+  step 1 (backend)  : "Add /stats endpoint."
+  step 2 (qa)       : "Add test_stats() in tests/test_main.py."  ← test-writing in qa
+  step 3 (qa)       : "Run gates."
 
 Return ONLY the `TaskPlan` object conforming to the schema. Do not write
 prose outside the structured output.
