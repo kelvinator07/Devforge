@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from agents import gen_trace_id, trace as _agents_trace
+from agents.tracing import get_trace_provider as _get_trace_provider
 
 from backend.common import get_backend
 from backend.cost.tracker import CostCapExceeded, default_cap, end_job, start_job
@@ -166,8 +168,14 @@ async def run_job(
     ticket_title: str,
     ticket_body: str,
     approval_token: str | None = None,
+    existing_job_id: int | None = None,
 ) -> dict:
-    """Run the full crew for a ticket. Returns a summary dict at end."""
+    """Run the full crew for a ticket. Returns a summary dict at end.
+
+    `existing_job_id` lets a caller (e.g. POST /jobs) pre-create the jobs
+    row so it can return the id to the client immediately. When set, this
+    function reuses that row instead of inserting a new one.
+    """
     api = os.environ.get("CONTROL_PLANE_API", "http://localhost:8001")
 
     _emit(None, "job_started", {
@@ -236,8 +244,13 @@ async def run_job(
     _emit(None, "token_minted", {"expires_at": tok.json()["expires_at"]})
 
     # Persist job row. Pre-flight rejection above guarantees the ticket is
-    # clean of real-shaped secrets — safe to write the originals.
-    job_id = _persist_job(tenant_id, repo_id, ticket_title, ticket_body)
+    # clean of real-shaped secrets — safe to write the originals. POST /jobs
+    # may have pre-created the row so it could return the id synchronously;
+    # in that case skip the insert and reuse the existing row.
+    if existing_job_id is not None:
+        job_id = existing_job_id
+    else:
+        job_id = _persist_job(tenant_id, repo_id, ticket_title, ticket_body)
     _emit(job_id, "job_persisted", {"job_id": job_id})
 
     # Start per-job cost tracking. Cap controlled by DEVFORGE_JOB_COST_CAP_USD.
@@ -245,183 +258,199 @@ async def run_job(
     start_job(job_id=job_id, cap_usd=cap)
     _emit(job_id, "cost_tracking_started", {"cap_usd": cap})
 
-    # RAG retrieval over tenant's codebase. The content retrieved is ALSO scrubbed
-    # before the Lead sees it — repo READMEs are attacker-controlled content.
-    hits = search_codebase(tenant_id, f"{ticket_title}\n{cleaned_body}", k=6)
-    for h in hits:
-        meta = h.get("metadata") or {}
-        text = h.get("text") or meta.get("text") or ""
-        cleaned, injections = scrub(text)
-        if injections:
-            _emit(job_id, "injection_detected", {
-                "where": f"rag:{meta.get('file')}:{meta.get('start_line')}",
-                "count": len(injections),
-                "patterns": injections[:5],
-            })
-        # Replace the text in the hit so Lead sees the scrubbed version.
-        h["text"] = cleaned
-        if "metadata" in h:
-            h["metadata"]["text"] = cleaned
-    _emit(job_id, "rag_hits", {"count": len(hits)})
-
-    # Lead agent.
-    plan: TaskPlan = await plan_ticket(ticket_id, ticket_title, cleaned_body, hits)
-    _emit(job_id, "lead_planned", {
-        "steps": [{"id": s.id, "kind": s.kind.value, "desc": s.description[:140]} for s in plan.steps],
-        "requires_human_approval": plan.requires_human_approval,
-        "estimated_cost_usd": plan.estimated_cost_usd,
-    })
-
-    # SafetyGuard: if any step is catastrophic, bail immediately.
-    for s in plan.steps:
-        sev = classify_plan_step(s.description, s.files_likely_touched)
-        if sev == "catastrophic":
-            _emit(job_id, "safety_refused", {"step": s.id, "reason": "catastrophic classification"})
-            _update_job_status(job_id, "refused")
-            return {"ok": False, "job_id": job_id, "reason": "catastrophic step"}
-
-    # SafetyGuard: if the plan requires human approval, check for an approval token.
-    if plan.requires_human_approval:
-        # The command we're approving is the ticket identity (NOT the job_id —
-        # every run_ticket invocation creates a fresh job_id, so a job-bound
-        # token would only ever authorize one already-failed run).
-        approval_command = f"run_job:{tenant_id}:{ticket_id}:{ticket_title}"
-        if not approval_token or not verify_and_consume(
-            command=approval_command, token_raw=approval_token,
-        ):
-            _emit(job_id, "approval_required", {
-                "reason": "plan has migration/dependency/infra step",
-                "approval_command": approval_command,
-                "hint": (
-                    "Mint a token then re-run with DEVFORGE_APPROVAL_TOKEN set.\n"
-                    "  uv run python -m scripts.mint_approval "
-                    f"--ticket '{approval_command}' --http"
-                ),
-            })
-            _update_job_status(job_id, "awaiting_approval")
-            return {"ok": False, "job_id": job_id, "reason": "approval required",
-                    "approval_command": approval_command}
-        _emit(job_id, "approval_consumed", {"job_id": job_id})
-        prior = _supersede_prior_awaiting(tenant_id, approval_command, job_id)
-        if prior:
-            _emit(job_id, "prior_approvals_superseded",
-                  {"superseded_job_ids": prior})
-
-    # Worktree.
-    wt: Worktree = prepare_worktree(tenant_id, repo_full_name, installation_token)
-    _emit(job_id, "worktree_ready", {"branch": wt.branch})
-
+    # Open a single Agents-SDK trace for the whole job. The LangFuse exporter
+    # in `crew.py` mirrors this trace + every child Runner.run as one trace
+    # tree on cloud.langfuse.com — the UI deep-links to it.
+    trace_id = gen_trace_id()
+    _emit(job_id, "trace_started", {"trace_id": trace_id})
     try:
-        # Run each step through its owning agent.
-        for step in plan.steps:
-            _emit(job_id, "step_started", {"id": step.id, "kind": step.kind.value})
-            if step.kind == StepKind.BACKEND:
-                result = await run_backend_step(tenant_id, step, wt.worktree_path)
-            elif step.kind == StepKind.FRONTEND:
-                result = await run_frontend_step(tenant_id, step, wt.worktree_path)
-            elif step.kind == StepKind.MIGRATION:
-                from backend.worker.migration_engineer import run_migration_step
-                result = await run_migration_step(tenant_id, step, wt.worktree_path)
-                _emit(job_id, "migration_staged", {
-                    "id": step.id,
-                    "files": result.files_changed,
-                    "note": (
-                        "Migration SQL files staged in worktree; review in the PR "
-                        "and apply manually after merge."
+      with _agents_trace(workflow_name=f"DevForge job #{job_id}", trace_id=trace_id):
+        # RAG retrieval over tenant's codebase. The content retrieved is ALSO scrubbed
+        # before the Lead sees it — repo READMEs are attacker-controlled content.
+        hits = search_codebase(tenant_id, f"{ticket_title}\n{cleaned_body}", k=6)
+        for h in hits:
+            meta = h.get("metadata") or {}
+            text = h.get("text") or meta.get("text") or ""
+            cleaned, injections = scrub(text)
+            if injections:
+                _emit(job_id, "injection_detected", {
+                    "where": f"rag:{meta.get('file')}:{meta.get('start_line')}",
+                    "count": len(injections),
+                    "patterns": injections[:5],
+                })
+            # Replace the text in the hit so Lead sees the scrubbed version.
+            h["text"] = cleaned
+            if "metadata" in h:
+                h["metadata"]["text"] = cleaned
+        _emit(job_id, "rag_hits", {"count": len(hits)})
+    
+        # Lead agent.
+        plan: TaskPlan = await plan_ticket(ticket_id, ticket_title, cleaned_body, hits)
+        _emit(job_id, "lead_planned", {
+            "steps": [{"id": s.id, "kind": s.kind.value, "desc": s.description[:140]} for s in plan.steps],
+            "requires_human_approval": plan.requires_human_approval,
+            "estimated_cost_usd": plan.estimated_cost_usd,
+        })
+    
+        # SafetyGuard: if any step is catastrophic, bail immediately.
+        for s in plan.steps:
+            sev = classify_plan_step(s.description, s.files_likely_touched)
+            if sev == "catastrophic":
+                _emit(job_id, "safety_refused", {"step": s.id, "reason": "catastrophic classification"})
+                _update_job_status(job_id, "refused")
+                return {"ok": False, "job_id": job_id, "reason": "catastrophic step"}
+    
+        # SafetyGuard: if the plan requires human approval, check for an approval token.
+        if plan.requires_human_approval:
+            # The command we're approving is the ticket identity (NOT the job_id —
+            # every run_ticket invocation creates a fresh job_id, so a job-bound
+            # token would only ever authorize one already-failed run).
+            approval_command = f"run_job:{tenant_id}:{ticket_id}:{ticket_title}"
+            if not approval_token or not verify_and_consume(
+                command=approval_command, token_raw=approval_token,
+            ):
+                _emit(job_id, "approval_required", {
+                    "reason": "plan has migration/dependency/infra step",
+                    "approval_command": approval_command,
+                    "hint": (
+                        "Mint a token then re-run with DEVFORGE_APPROVAL_TOKEN set.\n"
+                        "  uv run python -m scripts.mint_approval "
+                        f"--ticket '{approval_command}' --http"
                     ),
                 })
-            else:  # QA step in the plan — the real QA gates run at the end below.
-                _emit(job_id, "step_finished", {"id": step.id, "success": True,
-                                                "summary": "QA step deferred to gate run"})
-                continue
-            _emit(job_id, "step_finished", {
-                "id": step.id, "success": result.success,
-                "summary": result.summary, "files": result.files_changed,
-            })
-            if not result.success:
-                _update_job_status(job_id, "failed")
-                _emit(job_id, "job_done", {"ok": False, "reason": "step failed"})
-                return {"ok": False, "job_id": job_id}
-
-        # ---- QA gates run BEFORE push. Push only on all-green. ----
-        _emit(job_id, "qa_started", {})
-        qa = await run_qa(
-            tenant_id=tenant_id,
-            repo_full_name=repo_full_name,
-            branch=wt.branch,
-            installation_token=installation_token,
-            ticket_title=ticket_title,
-            ticket_body=ticket_body,
-            worktree=wt.worktree_path,
-        )
-        if not qa.passed:
-            _emit(job_id, "qa_gate_failed", {
-                "findings": [f.model_dump() for f in qa.findings][:10],
-                "count": len(qa.findings),
-            })
-            _update_job_status(job_id, "failed")
-            _emit(job_id, "job_done", {"ok": False, "reason": "qa gates failed",
-                                       "branch_pushed": False})
-            return {"ok": False, "job_id": job_id}
-
-        _emit(job_id, "qa_gate_passed", {"findings": len(qa.findings)})
-
-        # All-green: commit + push the branch, then open PR via REST.
-        push = commit_and_push(
-            wt.worktree_path, wt.branch, wt.remote_url,
-            commit_message=f"{ticket_id}: {ticket_title}\n\n{plan.analysis}",
-        )
-        if not push.get("pushed"):
-            # If the local QA gate passed but the REMOTE side caught a secret,
-            # treat that as a delayed qa_gate_failed so callers see it as a
-            # secret-detection event, not just "nothing to push".
-            if push.get("rejected_for_secret"):
+                _update_job_status(job_id, "awaiting_approval")
+                return {"ok": False, "job_id": job_id, "reason": "approval required",
+                        "approval_command": approval_command}
+            _emit(job_id, "approval_consumed", {"job_id": job_id})
+            prior = _supersede_prior_awaiting(tenant_id, approval_command, job_id)
+            if prior:
+                _emit(job_id, "prior_approvals_superseded",
+                      {"superseded_job_ids": prior})
+    
+        # Worktree.
+        wt: Worktree = prepare_worktree(tenant_id, repo_full_name, installation_token)
+        _emit(job_id, "worktree_ready", {"branch": wt.branch})
+    
+        try:
+            # Run each step through its owning agent.
+            for step in plan.steps:
+                _emit(job_id, "step_started", {"id": step.id, "kind": step.kind.value})
+                if step.kind == StepKind.BACKEND:
+                    result = await run_backend_step(tenant_id, step, wt.worktree_path)
+                elif step.kind == StepKind.FRONTEND:
+                    result = await run_frontend_step(tenant_id, step, wt.worktree_path)
+                elif step.kind == StepKind.MIGRATION:
+                    from backend.worker.migration_engineer import run_migration_step
+                    result = await run_migration_step(tenant_id, step, wt.worktree_path)
+                    _emit(job_id, "migration_staged", {
+                        "id": step.id,
+                        "files": result.files_changed,
+                        "note": (
+                            "Migration SQL files staged in worktree; review in the PR "
+                            "and apply manually after merge."
+                        ),
+                    })
+                else:  # QA step in the plan — the real QA gates run at the end below.
+                    _emit(job_id, "step_finished", {"id": step.id, "success": True,
+                                                    "summary": "QA step deferred to gate run"})
+                    continue
+                _emit(job_id, "step_finished", {
+                    "id": step.id, "success": result.success,
+                    "summary": result.summary, "files": result.files_changed,
+                    "test_result": result.test_result,
+                })
+                if not result.success:
+                    _update_job_status(job_id, "failed")
+                    _emit(job_id, "job_done", {"ok": False, "reason": "step failed"})
+                    return {"ok": False, "job_id": job_id}
+    
+            # ---- QA gates run BEFORE push. Push only on all-green. ----
+            _emit(job_id, "qa_started", {})
+            qa = await run_qa(
+                tenant_id=tenant_id,
+                repo_full_name=repo_full_name,
+                branch=wt.branch,
+                installation_token=installation_token,
+                ticket_title=ticket_title,
+                ticket_body=ticket_body,
+                worktree=wt.worktree_path,
+            )
+            if not qa.passed:
                 _emit(job_id, "qa_gate_failed", {
-                    "findings": [{"gate": "github-push-protection",
-                                  "severity": "HIGH",
-                                  "summary": "GitHub server-side scanner rejected the push"}],
-                    "count": 1,
-                    "stderr_tail": (push.get("stderr") or "")[-400:],
+                    "findings": [f.model_dump() for f in qa.findings][:10],
+                    "count": len(qa.findings),
                 })
                 _update_job_status(job_id, "failed")
+                _emit(job_id, "job_done", {"ok": False, "reason": "qa gates failed",
+                                           "branch_pushed": False})
+                return {"ok": False, "job_id": job_id}
+    
+            _emit(job_id, "qa_gate_passed", {"findings": len(qa.findings)})
+    
+            # All-green: commit + push the branch, then open PR via REST.
+            push = commit_and_push(
+                wt.worktree_path, wt.branch, wt.remote_url,
+                commit_message=f"{ticket_id}: {ticket_title}\n\n{plan.analysis}",
+            )
+            if not push.get("pushed"):
+                # If the local QA gate passed but the REMOTE side caught a secret,
+                # treat that as a delayed qa_gate_failed so callers see it as a
+                # secret-detection event, not just "nothing to push".
+                if push.get("rejected_for_secret"):
+                    _emit(job_id, "qa_gate_failed", {
+                        "findings": [{"gate": "github-push-protection",
+                                      "severity": "HIGH",
+                                      "summary": "GitHub server-side scanner rejected the push"}],
+                        "count": 1,
+                        "stderr_tail": (push.get("stderr") or "")[-400:],
+                    })
+                    _update_job_status(job_id, "failed")
+                    _emit(job_id, "job_done", {"ok": False,
+                                               "reason": "remote secret-scanner blocked push"})
+                    return {"ok": False, "job_id": job_id, "rejected_for_secret": True}
+    
+                _emit(job_id, "branch_push_failed", push)
+                _update_job_status(job_id, "failed")
                 _emit(job_id, "job_done", {"ok": False,
-                                           "reason": "remote secret-scanner blocked push"})
-                return {"ok": False, "job_id": job_id, "rejected_for_secret": True}
-
-            _emit(job_id, "branch_push_failed", push)
+                                           "reason": push.get("reason", "push failed")})
+                return {"ok": False, "job_id": job_id}
+    
+            _emit(job_id, "branch_pushed", push)
+    
+            # Open PR. Pre-flight rejection ran at the top of run_job, so the
+            # original ticket_title + ticket_body are guaranteed secret-free.
+            pr_url = _open_pr(
+                repo_full_name=repo_full_name,
+                branch=wt.branch,
+                installation_token=installation_token,
+                title=ticket_title,
+                body=f"{ticket_body}\n\n---\n🤖 Opened by DevForge orchestrator after all gates passed.",
+            )
+            if pr_url:
+                _emit(job_id, "pr_opened", {"url": pr_url})
+                _update_job_status(job_id, "pr_opened", pr_url)
+                _emit(job_id, "job_done", {"ok": True, "pr_url": pr_url})
+                return {"ok": True, "job_id": job_id, "pr_url": pr_url}
+    
+            _emit(job_id, "pr_open_failed", {})
             _update_job_status(job_id, "failed")
-            _emit(job_id, "job_done", {"ok": False,
-                                       "reason": push.get("reason", "push failed")})
             return {"ok": False, "job_id": job_id}
-
-        _emit(job_id, "branch_pushed", push)
-
-        # Open PR. Pre-flight rejection ran at the top of run_job, so the
-        # original ticket_title + ticket_body are guaranteed secret-free.
-        pr_url = _open_pr(
-            repo_full_name=repo_full_name,
-            branch=wt.branch,
-            installation_token=installation_token,
-            title=ticket_title,
-            body=f"{ticket_body}\n\n---\n🤖 Opened by DevForge orchestrator after all gates passed.",
-        )
-        if pr_url:
-            _emit(job_id, "pr_opened", {"url": pr_url})
-            _update_job_status(job_id, "pr_opened", pr_url)
-            _emit(job_id, "job_done", {"ok": True, "pr_url": pr_url})
-            return {"ok": True, "job_id": job_id, "pr_url": pr_url}
-
-        _emit(job_id, "pr_open_failed", {})
-        _update_job_status(job_id, "failed")
-        return {"ok": False, "job_id": job_id}
-    finally:
-        wt.cleanup()
-        # Always emit a cost summary so the dashboard has data, even on failure.
-        state = end_job()
-        if state is not None:
-            _emit(job_id, "cost_summary", {
-                "spent_usd": round(state.spent_usd, 6),
-                "cap_usd": state.cap_usd,
-                "calls": state.calls,
-                "by_model": {k: round(v, 6) for k, v in state.by_model.items()},
+        finally:
+            wt.cleanup()
+            # Always emit a cost summary so the dashboard has data, even on failure.
+            state = end_job()
+            if state is not None:
+                _emit(job_id, "cost_summary", {
+                    "spent_usd": round(state.spent_usd, 6),
+                    "cap_usd": state.cap_usd,
+                    "calls": state.calls,
+                    "by_model": {k: round(v, 6) for k, v in state.by_model.items()},
             })
+    finally:
+        # Force-flush the Agents-SDK BatchTraceProcessor so trace + spans land
+        # on LangFuse before the worker subprocess exits. Without this, the
+        # OTel exporter may buffer pending spans past the process lifetime.
+        try:
+            _get_trace_provider().force_flush()
+        except Exception:
+            pass

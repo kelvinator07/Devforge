@@ -1,11 +1,13 @@
+import { useRouter } from "next/router";
 import { useState } from "react";
+import toast from "react-hot-toast";
 
-import { mintApproval, type PendingApproval } from "../lib/api";
+import { mintApprovalAndRun, type PendingApproval } from "../lib/api";
 
 type Props = { item: PendingApproval };
 
 export function PendingApprovalCard({ item }: Props) {
-  const [token, setToken] = useState<string | null>(null);
+  const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -17,11 +19,18 @@ export function PendingApprovalCard({ item }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const { token } = await mintApproval(item.approval_command);
-      setToken(token);
+      const { job_id } = await mintApprovalAndRun({
+        command: item.approval_command,
+        tenant_id: item.tenant_id,
+        ticket_title: item.ticket_title,
+        ticket_body: item.ticket_body,
+      });
+      toast.success(`approval minted · running job #${job_id}`);
+      router.push(`/jobs/${job_id}`);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      toast.error(msg);
       setBusy(false);
     }
   }
@@ -33,15 +42,14 @@ export function PendingApprovalCard({ item }: Props) {
           <div className="text-sm font-medium text-amber-200">job #{item.id} · {item.ticket_title}</div>
           <div className="mt-1 truncate text-xs text-zinc-500">{item.ticket_body}</div>
         </div>
-        {!token && (
-          <button
-            disabled={busy || !item.approval_command}
-            onClick={handleApprove}
-            className="shrink-0 rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
-          >
-            {busy ? "minting..." : "Approve"}
-          </button>
-        )}
+        <button
+          disabled={busy || !item.approval_command}
+          onClick={handleApprove}
+          className="shrink-0 rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+          title="Mint a token AND immediately spawn the run; navigate to its job page"
+        >
+          {busy ? "starting..." : "Approve & run"}
+        </button>
       </div>
       {item.approval_command && (
         <div className="mt-2 truncate font-mono text-[11px] text-zinc-500">
@@ -49,27 +57,6 @@ export function PendingApprovalCard({ item }: Props) {
         </div>
       )}
       {error && <div className="mt-2 text-xs text-rose-400">{error}</div>}
-      {token && (
-        <div className="mt-3 rounded bg-zinc-900 p-3 text-xs">
-          <div className="mb-1 text-emerald-400">approval token minted (5-min TTL)</div>
-          <div className="break-all font-mono text-zinc-200">{token}</div>
-          <div className="mt-2 text-zinc-500">
-            Re-run from CLI:
-            <pre className="mt-1 select-all">
-{`DEVFORGE_APPROVAL_TOKEN=${token} \\
-DEVFORGE_TICKET_TITLE=${JSON.stringify(item.ticket_title)} \\
-DEVFORGE_TICKET_BODY=${JSON.stringify(item.ticket_body)} \\
-  uv run python -m scripts.run_ticket ${item.tenant_id}`}
-            </pre>
-          </div>
-          <button
-            onClick={() => navigator.clipboard.writeText(token)}
-            className="mt-2 rounded border border-zinc-700 px-2 py-1 text-zinc-300 hover:bg-zinc-800"
-          >
-            copy token
-          </button>
-        </div>
-      )}
     </div>
   );
 }

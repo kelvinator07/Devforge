@@ -8,6 +8,7 @@ Environment:
     DEVFORGE_TICKET_TITLE
     DEVFORGE_TICKET_BODY
     DEVFORGE_APPROVAL_TOKEN  (required when the plan asks for approval)
+    DEVFORGE_JOB_ID          (set by POST /jobs to reuse a pre-created row)
 
 Streams JSON-lines events on stdout. Pipe to `jq .` for pretty output.
 """
@@ -43,6 +44,8 @@ async def main() -> None:
         "tests/test_main.py asserting status 200 and the correct count.",
     )
     approval_token = os.environ.get("DEVFORGE_APPROVAL_TOKEN")
+    existing_job_id_raw = os.environ.get("DEVFORGE_JOB_ID")
+    existing_job_id = int(existing_job_id_raw) if existing_job_id_raw else None
 
     from backend.worker.orchestrator import run_job
     result = await run_job(
@@ -51,6 +54,7 @@ async def main() -> None:
         ticket_title=ticket_title,
         ticket_body=ticket_body,
         approval_token=approval_token,
+        existing_job_id=existing_job_id,
     )
     if not result.get("ok"):
         sys.exit(1)

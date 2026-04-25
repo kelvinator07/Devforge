@@ -3,7 +3,7 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState } from "react";
 
-import { useApi, type JobEvent } from "../../lib/api";
+import { useApi, langfuseTraceUrl, type JobEvent } from "../../lib/api";
 import { tailJob, type IncomingEvent } from "../../lib/sse";
 import { EventCard } from "../../components/EventCard";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -84,6 +84,13 @@ function JobPageInner() {
   }
   merged.sort((a, b) => a.id - b.id);
 
+  // Pull the LangFuse trace id off the `trace_started` event (emitted by the
+  // orchestrator immediately after `cost_tracking_started`). Hidden when the
+  // env var NEXT_PUBLIC_LANGFUSE_PROJECT_ID is unset.
+  const traceStarted = merged.find((e) => e.type === "trace_started");
+  const traceId = traceStarted?.data?.trace_id as string | undefined;
+  const traceUrl = traceId ? langfuseTraceUrl(traceId) : null;
+
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
       <header className="mb-6 flex items-center justify-between">
@@ -103,6 +110,13 @@ function JobPageInner() {
             </div>
             <div className="shrink-0 flex items-center gap-2">
               <StatusBadge status={snapshot.data.job.status} />
+              {traceUrl && (
+                <a href={traceUrl} target="_blank" rel="noreferrer"
+                   className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                   title="Open this job's full agent trace on LangFuse">
+                  view trace ↗
+                </a>
+              )}
               {snapshot.data.job.pr_url && (
                 <a href={snapshot.data.job.pr_url} target="_blank" rel="noreferrer"
                    className="rounded bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-500">

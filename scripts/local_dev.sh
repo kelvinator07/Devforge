@@ -45,7 +45,13 @@ except Exception as e: print(f'GITHUB_APP_PRIVATE_KEY: MISSING ({e})')
 
   serve)
     echo "== starting control plane on http://localhost:8001 =="
-    exec uv run uvicorn backend.control_plane.main:app --reload --host 0.0.0.0 --port 8001
+    # --reload watches the cwd. Without excludes, it sees the orchestrator
+    # writing into data/worktrees/ mid-job and kills the in-flight worker.
+    # Watch only the actual source trees + scope the watch to .py files.
+    exec uv run uvicorn backend.control_plane.main:app \
+      --reload --host 0.0.0.0 --port 8001 \
+      --reload-dir backend --reload-dir scripts \
+      --reload-include "*.py"
     ;;
 
   smoke)

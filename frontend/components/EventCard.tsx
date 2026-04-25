@@ -28,18 +28,32 @@ const ACCENT: Record<string, string> = {
   cost_summary: "border-l-cyan-500",
   job_started: "border-l-zinc-500",
   job_done: "border-l-zinc-500",
+  trace_started: "border-l-cyan-500",
 };
 
 export function EventCard({ id, type, data, ts }: Props) {
   const [open, setOpen] = useState(false);
   const accent = ACCENT[type] || "border-l-zinc-600";
   const summary = friendlySummary(type, data);
+  // For step_finished failures, surface the agent's summary + test_result
+  // inline so the user doesn't have to expand `details` to see the reason.
+  const isFailedStep = type === "step_finished" && data.success === false;
+  const failureSummary = isFailedStep ? (data.summary as string | undefined) : undefined;
+  const failureTestResult = isFailedStep ? (data.test_result as string | undefined) : undefined;
   return (
     <div className={`rounded border border-zinc-800 border-l-4 ${accent} bg-[var(--card)] p-3`}>
       <div className="flex items-baseline justify-between gap-3">
-        <div>
+        <div className="min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wide text-zinc-500">#{id} · {type}</div>
           <div className="mt-0.5 text-sm text-zinc-200">{summary}</div>
+          {failureSummary && (
+            <div className="mt-1 text-xs text-rose-300">{failureSummary}</div>
+          )}
+          {failureTestResult && (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-zinc-950/60 p-2 font-mono text-[11px] text-zinc-400">
+{failureTestResult}
+            </pre>
+          )}
         </div>
         <button
           className="shrink-0 text-xs text-zinc-400 hover:text-zinc-200"
@@ -78,6 +92,7 @@ function friendlySummary(type: string, d: Record<string, unknown>): string {
       return `superseded ${ids.length} prior job${ids.length === 1 ? "" : "s"}: ${ids.join(", ")}`;
     }
     case "cost_summary":     return `$${(d.spent_usd as number | undefined)?.toFixed?.(4) ?? "?"} · ${d.calls ?? "?"} calls`;
+    case "trace_started":    return `trace_id: ${d.trace_id ?? "?"}`;
     case "job_done":         return d.ok ? `OK · ${d.pr_url ?? ""}` : `FAIL · ${d.reason ?? ""}`;
     default:                 return "";
   }

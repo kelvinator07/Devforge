@@ -155,7 +155,13 @@ def _enable_langfuse_tracing() -> None:
                         or trace_data.get("name")
                         or "agent_workflow"
                     )
+                    # Forward the Agents-SDK trace_id to LangFuse so deep links
+                    # from /jobs/[id] resolve. LangFuse expects 32-hex (OTel)
+                    # without the "trace_" prefix.
+                    lf_trace_id = (trace_id or "").removeprefix("trace_") or None
+                    trace_ctx = {"trace_id": lf_trace_id} if lf_trace_id else None
                     with lf.start_as_current_observation(
+                        trace_context=trace_ctx,
                         name=name, as_type="agent", metadata=trace_data,
                     ) as root:
                         for span_data in spans_by_trace.pop(trace_id, []):
@@ -164,13 +170,17 @@ def _enable_langfuse_tracing() -> None:
                     print(f"[trace] export failed: {exc}", flush=True)
 
             # Orphan spans whose parent landed in a different batch — emit as
-            # standalone observations so they're not lost.
-            for span_list in spans_by_trace.values():
+            # standalone observations so they're not lost. Forward their
+            # parent trace_id so they nest under the right job.
+            for orphan_tid, span_list in spans_by_trace.items():
+                lf_orphan_tid = (orphan_tid or "").removeprefix("trace_") or None
+                orphan_ctx = {"trace_id": lf_orphan_tid} if lf_orphan_tid else None
                 for span_data in span_list:
                     try:
                         sd = span_data.get("span_data") or {}
                         span_name = sd.get("name") or sd.get("type") or "orphan_span"
                         with lf.start_as_current_observation(
+                            trace_context=orphan_ctx,
                             name=span_name, as_type="span", metadata=span_data,
                         ):
                             pass

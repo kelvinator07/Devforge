@@ -58,18 +58,25 @@ Rules:
     commit. Running `run_tests` is enough to validate correctness.
 
 Return an `EngineerResult` with:
-  - success: bool
-  - summary: 1-3 sentence changelog line
+  - success: bool — True ONLY if `run_tests` exited 0 end-to-end. If you
+    could not even run tests (e.g. dependency unavailable, syntax error
+    blocking import), success MUST be False.
+  - summary: 1-3 sentence changelog. ON FAILURE, the FIRST sentence MUST
+    state the root cause in plain language (e.g. "Dependency fastapi>=0.200
+    not available on PyPI", "Test test_stats failed: AssertionError on
+    user_count == 3", "SyntaxError in app/main.py line 14"). Don't just
+    describe what you tried.
   - files_changed: list of paths you wrote to
-  - test_result: short description of the last test run
+  - test_result: literal stdout/stderr excerpt from the last `run_tests`
+    call (truncate to ~500 chars). On success, "all N tests passed".
 """
 
 
 class EngineerResult(BaseModel):
-    success: bool = Field(..., description="True iff tests passed")
-    summary: str = Field(..., description="1-3 sentence description of the change")
+    success: bool = Field(..., description="True ONLY if run_tests exited 0 end-to-end. False if tests could not run at all (dep missing, import error, etc.).")
+    summary: str = Field(..., description="1-3 sentence changelog. On failure, FIRST sentence must state the root cause (e.g. 'Dependency X not available', 'Test Y failed with Z').")
     files_changed: list[str] = Field(default_factory=list)
-    test_result: str = Field(..., description="Short description of the last run_tests outcome")
+    test_result: str = Field(..., description="Literal stdout/stderr excerpt from the last run_tests call (truncate to ~500 chars). On success: 'all N tests passed'.")
 
 
 def _search_codebase_tool(tenant_id: int):

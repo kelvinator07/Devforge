@@ -163,6 +163,22 @@ class OnboardRequest(BaseModel):
     installation_id: int
 
 
+class SubmitJobRequest(BaseModel):
+    tenant_id: int
+    ticket_title: str = Field(..., min_length=1, max_length=512)
+    ticket_body: str = Field(..., min_length=1, max_length=8192)
+    ticket_id: str = "DEMO-1"
+    approval_token: str | None = None
+
+
+class ApproveAndRunRequest(BaseModel):
+    command: str = Field(..., min_length=1, max_length=512)
+    tenant_id: int
+    ticket_title: str = Field(..., min_length=1, max_length=512)
+    ticket_body: str = Field(..., min_length=1, max_length=8192)
+    ticket_id: str = "DEMO-1"
+
+
 @app.get("/health")
 def health():
     return {
@@ -361,6 +377,127 @@ def list_jobs(tenant_id: int | None = None, limit: int = 50,
             {"t": tenant_id, "lim": limit},
         )
     return {"jobs": rows}
+
+
+def _spawn_run_ticket(
+    *, tenant_id: int, ticket_id: str, ticket_title: str, ticket_body: str,
+    approval_token: str | None = None,
+) -> tuple[int, str]:
+    """Validate tenant+repo, pre-create the queued jobs row, spawn
+    `scripts.run_ticket` as a detached subprocess. Returns (job_id, log_path).
+
+    Local-only: AWS deploy needs SQS dispatch instead of subprocess spawn.
+    """
+    tenant_rows = _backend.db.execute(
+        "SELECT id FROM tenants WHERE id = :t", {"t": tenant_id}
+    )
+    if not tenant_rows:
+        raise HTTPException(404, f"tenant {tenant_id} not found")
+    repo_rows = _backend.db.execute(
+        "SELECT id FROM repos WHERE tenant_id = :t ORDER BY id LIMIT 1",
+        {"t": tenant_id},
+    )
+    if not repo_rows:
+        raise HTTPException(409, f"tenant {tenant_id} has no registered repos")
+    repo_id = repo_rows[0]["id"]
+
+    new_rows = _backend.db.execute(
+        """
+        INSERT INTO jobs (tenant_id, repo_id, ticket_title, ticket_body, status)
+        VALUES (:t, :r, :title, :body, 'queued')
+        RETURNING id
+        """,
+        {"t": tenant_id, "r": repo_id, "title": ticket_title, "body": ticket_body},
+    )
+    job_id = new_rows[0]["id"]
+
+    import subprocess
+    env = dict(os.environ)
+    env["DEVFORGE_TICKET_ID"] = ticket_id
+    env["DEVFORGE_TICKET_TITLE"] = ticket_title
+    env["DEVFORGE_TICKET_BODY"] = ticket_body
+    env["DEVFORGE_JOB_ID"] = str(job_id)
+    if approval_token:
+        env["DEVFORGE_APPROVAL_TOKEN"] = approval_token
+
+    log_dir = _REPO_ROOT / "data" / "job_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"job_{job_id}.log"
+    log_fp = log_path.open("a")
+    subprocess.Popen(
+        ["uv", "run", "python", "-m", "scripts.run_ticket", str(tenant_id)],
+        cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=log_fp,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return job_id, str(log_path)
+
+
+@app.post("/jobs", status_code=202)
+def submit_job(req: SubmitJobRequest, _auth: dict = Depends(dual_auth)):
+    """Submit a ticket through the full crew. Pre-flights for secrets,
+    pre-creates the jobs row so we can return its id, then spawns
+    `scripts.run_ticket` via `_spawn_run_ticket` (mirroring the CLI
+    invocation path).
+
+    Returns 422 if the ticket itself contains live-shaped secrets.
+    """
+    from backend.safety import scan_secrets
+
+    title_hits = scan_secrets(req.ticket_title)
+    body_hits = scan_secrets(req.ticket_body)
+    if title_hits or body_hits:
+        findings = [
+            {"where": where, "kind": kind, "summary": f"ticket {where} contains {kind}: {snippet}"}
+            for where, hits in [("title", title_hits), ("body", body_hits)]
+            for kind, snippet in hits
+        ]
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason": "ticket contains real-shaped secret(s)",
+                "findings": findings,
+                "remediation": (
+                    "Move the secret to environment variables or reference it by "
+                    "name only. DevForge agents will not run on tickets with "
+                    "embedded credentials."
+                ),
+            },
+        )
+
+    job_id, log_path = _spawn_run_ticket(
+        tenant_id=req.tenant_id,
+        ticket_id=req.ticket_id,
+        ticket_title=req.ticket_title,
+        ticket_body=req.ticket_body,
+        approval_token=req.approval_token,
+    )
+    return {"job_id": job_id, "log_path": log_path}
+
+
+@app.post("/approvals/run", status_code=202)
+def mint_approval_and_run(
+    req: ApproveAndRunRequest,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+):
+    """Admin-gated: mint a ticket-bound approval token AND immediately
+    spawn a fresh run of the ticket. Returns the new job_id so the caller
+    can navigate straight to its live event stream — no copy-paste of
+    the token to a CLI.
+    """
+    _check_admin(x_admin_token)
+    from backend.safety import mint
+    token = mint(command=req.command)
+    job_id, _log = _spawn_run_ticket(
+        tenant_id=req.tenant_id,
+        ticket_id=req.ticket_id,
+        ticket_title=req.ticket_title,
+        ticket_body=req.ticket_body,
+        approval_token=token,
+    )
+    return {"token": token, "command": req.command, "job_id": job_id}
 
 
 @app.get("/approvals/pending")

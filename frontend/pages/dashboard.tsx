@@ -1,8 +1,10 @@
 import { SignedIn, SignedOut, RedirectToSignIn, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
+import { useState } from "react";
 
 import { useApi, type Job, type Tenant } from "../lib/api";
 import { StatusBadge } from "../components/StatusBadge";
+import { NewTicketModal } from "../components/NewTicketModal";
 
 export default function Dashboard() {
   return (
@@ -17,13 +19,28 @@ export default function Dashboard() {
   );
 }
 
+type StatusFilter = "all" | "running" | "pr_opened" | "failed" | "awaiting_approval";
+
 function DashboardInner() {
   const tenant = useApi<Tenant>("/tenants/1");
-  const jobs = useApi<{ jobs: Job[] }>("/jobs?tenant_id=1&limit=50");
+  const jobs = useApi<{ jobs: Job[] }>("/jobs?tenant_id=1&limit=50", { pollMs: 3000 });
+  const [newTicketOpen, setNewTicketOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [search, setSearch] = useState("");
 
-  const totalJobs = jobs.data?.jobs.length ?? 0;
-  const success = jobs.data?.jobs.filter((j) => j.status === "pr_opened").length ?? 0;
-  const failed = jobs.data?.jobs.filter((j) => ["failed", "refused"].includes(j.status)).length ?? 0;
+  const allJobs = jobs.data?.jobs ?? [];
+  const totalJobs = allJobs.length;
+  const success = allJobs.filter((j) => j.status === "pr_opened").length;
+  const failed = allJobs.filter((j) => ["failed", "refused"].includes(j.status)).length;
+
+  const filteredJobs = allJobs.filter((j) => {
+    if (statusFilter === "running" && !["queued", "running"].includes(j.status)) return false;
+    if (statusFilter === "pr_opened" && j.status !== "pr_opened") return false;
+    if (statusFilter === "failed" && !["failed", "refused"].includes(j.status)) return false;
+    if (statusFilter === "awaiting_approval" && j.status !== "awaiting_approval") return false;
+    if (search && !j.ticket_title.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
@@ -31,9 +48,9 @@ function DashboardInner() {
         <div>
           <h1 className="text-2xl font-semibold">DevForge</h1>
           <p className="text-sm text-zinc-500">
-            <Link href="/dashboard">dashboard</Link>
+            <Link href="/dashboard">Dashboard</Link>
             {" · "}
-            <Link href="/approvals">approvals</Link>
+            <Link href="/approvals">Approvals</Link>
           </p>
         </div>
         <UserButton />
@@ -69,12 +86,49 @@ function DashboardInner() {
       <section>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-lg font-medium">Recent jobs</h2>
-          <button
-            onClick={() => { tenant.refresh(); jobs.refresh(); }}
-            className="text-xs text-zinc-400 hover:text-zinc-200"
-          >
-            Refresh
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setNewTicketOpen(true)}
+              disabled={!tenant.data}
+              className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            >
+              + New ticket
+            </button>
+            <button
+              onClick={() => { tenant.refresh(); jobs.refresh(); }}
+              className="text-xs text-zinc-400 hover:text-zinc-200"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            placeholder="search title…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-100 outline-none focus:border-indigo-500"
+          />
+          {(["all", "running", "pr_opened", "failed", "awaiting_approval"] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              className={`rounded border px-2.5 py-1 text-xs ${
+                statusFilter === s
+                  ? "border-indigo-500 bg-indigo-500/10 text-indigo-200"
+                  : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+          {(statusFilter !== "all" || search) && (
+            <span className="ml-auto text-xs text-zinc-500">
+              {filteredJobs.length} of {totalJobs}
+            </span>
+          )}
         </div>
         {jobs.loading && <div className="text-zinc-500">loading...</div>}
         {jobs.error && <ErrorCard msg={jobs.error} />}
@@ -91,7 +145,10 @@ function DashboardInner() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800">
-                {jobs.data.jobs.map((j) => (
+                {filteredJobs.length === 0 && (
+                  <tr><td colSpan={5} className="px-4 py-6 text-center text-xs text-zinc-500">no jobs match this filter</td></tr>
+                )}
+                {filteredJobs.map((j) => (
                   <tr key={j.id} className="hover:bg-zinc-900/50">
                     <td className="px-4 py-2 font-mono text-zinc-400">{j.id}</td>
                     <td className="px-4 py-2">
@@ -117,6 +174,14 @@ function DashboardInner() {
           </div>
         )}
       </section>
+
+      {tenant.data && (
+        <NewTicketModal
+          tenantId={tenant.data.id}
+          open={newTicketOpen}
+          onClose={() => { setNewTicketOpen(false); jobs.refresh(); }}
+        />
+      )}
     </div>
   );
 }
