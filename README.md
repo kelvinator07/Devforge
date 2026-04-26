@@ -6,7 +6,7 @@ See `/Users/kelvini/Andela-LLM-Engineering/DevForge-openrouter.md` for the origi
 
 ## Status
 
-**Days 1–14 + Tier-2 + Frontend (Tiers A/B/C) complete.** Local-first with AWS deploy parity for every layer including the frontend. Ticket submission, one-click approval, live SSE event tail, LangFuse trace deep-link, multi-tenant scoping by Clerk identity, and S3+CloudFront frontend deploy all shipped.
+Local-first with AWS deploy parity for every layer including the frontend. Ticket submission, one-click approval, live SSE event tail, LangFuse trace deep-link, multi-tenant scoping by Clerk identity, and S3+CloudFront frontend deploy all shipped.
 
 | Concept | Where |
 |---|---|
@@ -29,16 +29,15 @@ See `/Users/kelvini/Andela-LLM-Engineering/DevForge-openrouter.md` for the origi
 - **Database:** Aurora Serverless v2 (Data API) / SQLite
 - **Secrets:** AWS Secrets Manager / `.env.local` + `secrets/`
 - **Static analysis:** Semgrep + detect-secrets (gitleaks-equivalent)
+- **Testing:** pytest (backend, 106 unit tests across safety + ingest) + vitest (frontend, 9 unit tests for `lib/api.ts`)
 - **Observability:** LangFuse v4 cloud (custom Agents-SDK → LangFuse exporter in `backend/worker/crew.py`)
 - **Frontend:** Next.js 16 (Pages Router) + Tailwind v4 + Clerk v6 + `@microsoft/fetch-event-source` for header-authenticated SSE
 - **Auth:** Clerk JWT for the dashboard, admin token for CLI tooling, dual-auth on every gated endpoint
-- **Infra:** Terraform (8 independent modules) + Docker Desktop
+- **Infra:** Terraform (6 independent modules) + Docker Desktop
 
 ## Architecture
 
-A ticket flows from the browser to a 5-agent crew that plans, implements,
-gates, and ships a PR — all inside a sandboxed worktree. Local and AWS share
-the same code; only the dispatch shim and the storage adapters differ.
+A ticket flows from the browser to a 5-agent crew that plans, implements, tests, and ships a PR — all inside a sandboxed worktree. Local and AWS share the same code; only the dispatch shim and the storage adapters differ.
 
 ```mermaid
 flowchart TB
@@ -93,7 +92,7 @@ flowchart TB
     Aws --> worker
 
     Lead --> Eng --> Qa
-    Qa -->|gates pass| Gh
+    Qa -->|tests pass| Gh
 
     Lead -.->|tool calls| Mcps
     Eng  -.->|tool calls| Mcps
@@ -115,7 +114,7 @@ flowchart TB
 **Read it as request flow:**
 1. User signs into the Next.js dashboard via Clerk; every API call carries a `Bearer` JWT.
 2. `POST /jobs` (or `POST /approvals/run`) hits the dual-auth gate, persists a job row, and dispatches a worker — `subprocess.Popen` locally, `ecs.run_task()` on AWS. Same downstream code path either way.
-3. The orchestrator runs the 5-agent crew through a single LangFuse trace: Lead plans → Engineers code (writes via fs-mcp, runs tests via sandbox-mcp) → QA gates → opens PR via the GitHub App.
+3. The orchestrator runs the 5-agent crew through a single LangFuse trace: Lead plans → Engineers code (writes via fs-mcp, runs tests via sandbox-mcp) → QA tests → opens PR via the GitHub App.
 4. Every step is intercepted by the four SafetyGuard layers: ticket secrets reject up front, a denylist refuses catastrophic ops, migrations and dep bumps require an approval token, and fs/egress are scope-checked.
 5. The browser tails `/jobs/{id}/sse` for live events; the dashboard polls `/jobs?tenant_id=…` every 3s for job-list updates.
 
@@ -156,10 +155,15 @@ frontend/          Next.js 16 + Clerk + Tailwind v4 dashboard
 terraform/
   1_permissions/   Secrets Manager (OpenRouter key, GitHub App PEM) + IAM policy + CMK
   2_sagemaker/     Embedding endpoint
-  5_database/      Aurora Serverless v2 with Data API
-  6_worker/        ECS Fargate + 443-only egress SG
-  7_control_plane/ Control plane Lambda + HTTP API
-  8_frontend/      S3 + CloudFront (OAC, SPA fallback) for the static-export Next app
+  3_database/      Aurora Serverless v2 with Data API
+  4_worker/        ECS Fargate + 443-only egress SG
+  5_control_plane/ Control plane Lambda + HTTP API
+  6_frontend/      S3 + CloudFront (OAC, SPA fallback) for the static-export Next app
+tests/
+  conftest.py            — sys.path setup + tmp_db fixture (per-test SQLite + migrations)
+  safety/                — test_secret_redact, test_denylist, test_approval (92 tests)
+  ingest/                — test_chunker (14 tests)
+frontend/lib/api.test.ts — vitest suite for fetch wrappers + URL builders
 scripts/
   local_dev.sh           — setup | serve | smoke | onboard
   deploy_aws.sh          — all | <module> | frontend | destroy
@@ -176,10 +180,7 @@ scripts/
 
 ## Quickstart (local — Docker + Makefile)
 
-The local stack runs in two containers: control plane (FastAPI on :8001) and
-frontend (Next.js on :3000). Workers spawn as subprocesses inside the
-control-plane container per ticket. Source is bind-mounted for hot-reload —
-edit `backend/`, `scripts/`, or `frontend/` and the running stack picks it up.
+The local stack runs in two containers: control plane (FastAPI on :8001) and frontend (Next.js on :3000). Workers spawn as subprocesses inside the control-plane container per ticket. Source is bind-mounted for hot-reload edit `backend/`, `scripts/`, or `frontend/` and the running stack picks it up.
 
 ```bash
 cd devforge
@@ -196,6 +197,7 @@ make shell
 
 make seed         # populate + index the demo GitHub repo (one-time)
 make ticket       # run the default demo ticket E2E through the crew
+make test         # 106 pytest + 9 vitest unit tests, ~3s, $0
 make redteam      # 9/9 deterministic guardrails, $0
 make cost         # per-job cost dashboard
 make logs         # tail both services
@@ -205,20 +207,33 @@ make clean        # wipe volumes + data/
 
 `make help` lists every target.
 
-> **Non-Docker fallback:** the original `./scripts/local_dev.sh` flow is still
-> supported for power users who want the host's `uv` + `npm` directly. Run
-> `./scripts/local_dev.sh setup && ./scripts/local_dev.sh serve` and start
-> `cd frontend && npm run dev` in another terminal. `Makefile` is the
-> documented path going forward; `local_dev.sh` is preserved.
+### Unit tests
 
-See `TESTING.md` for the full 41-step verification walkthrough and `DEMO.md` for the 5-minute capstone demo flow.
+```bash
+make test           # both suites
+make test-backend   # uv run pytest -q
+make test-frontend  # cd frontend && npm test (vitest)
+```
+
+Coverage targets the safety-critical primitives whose regressions cause silent damage:
+
+| Module | Tests | What's covered |
+|---|---|---|
+| `backend/safety/secret_redact.py` | 43 | 14 detector families × scan + redact + false-positive guards |
+| `backend/safety/denylist.py` | 40 | 3-tier classifier (safe/destructive/catastrophic) + plan-step path |
+| `backend/safety/approval.py` | 9 | mint/verify round-trip, one-time use, TTL, command-swap, strict job scoping |
+| `backend/ingest/chunker.py` | 14 | Python AST + JS heuristic + line-window fallback + repo walk skip rules |
+| `frontend/lib/api.ts` | 9 | fetch wrappers, JWT attachment, 422 secret-rejection surfacing, URL builders |
+
+Pytest fixtures (`tests/conftest.py`) provide a per-test SQLite at `tmp_path/devforge.db` with all migrations applied — no test ever touches the dev DB.
+
+> **Non-Docker fallback:** the original `./scripts/local_dev.sh` flow is still supported for power users who want the host's `uv` + `npm` directly. 
+> Run `./scripts/local_dev.sh setup && ./scripts/local_dev.sh serve` and start `cd frontend && npm run dev` in another terminal.
+> `Makefile` is the documented path going forward; `local_dev.sh` is preserved.
 
 ## Push to AWS
 
-`DEVFORGE_BACKEND=local|aws` is the only switch; the same code runs both
-ways. Below is the end-to-end runbook for a fresh AWS account. All the
-heavy lifting goes through `scripts/deploy_aws.sh` — each subcommand is
-idempotent and mirrors a single Terraform module.
+`DEVFORGE_BACKEND=local|aws` is the only switch; the same code runs both ways. Below is the end-to-end runbook for a fresh AWS account. All the heavy lifting goes through `scripts/deploy_aws.sh` — each subcommand is idempotent and mirrors a single Terraform module.
 
 ### Prerequisites
 
@@ -227,6 +242,7 @@ idempotent and mirrors a single Terraform module.
 | AWS CLI configured (`aws sts get-caller-identity` resolves) | Terraform + boto3 use these creds |
 | IAM perms on the deploying user: VPC, ECS, Lambda, IAM, Secrets Manager, KMS (incl. `kms:CreateKey`), RDS, S3, CloudFront, SageMaker, API Gateway, Route 53 (if using a custom domain) | One-shot grant to the user; see `terraform/1_permissions/main.tf` for the full surface |
 | Docker Desktop (or daemon) running | Builds the worker + control plane container images for ECR |
+| `uv` 0.11+ installed | Python package and project manager |
 | Node 20+ + `npm` | Builds the static frontend export |
 | OpenRouter API key | LLM inference for all agents |
 | GitHub App created (one per AWS environment) — note the App ID + download the PEM | Per-tenant install tokens; see `scripts/install_github_app.py` for the onboarding helper |
@@ -248,9 +264,7 @@ LANGFUSE_SECRET_KEY=sk-lf-…
 AWS_REGION=us-east-1
 ```
 
-For each module, copy `terraform.tfvars.example` → `terraform.tfvars`
-and fill in the placeholders. Cross-module ARNs (Aurora, secrets,
-worker outputs) get filled in as you progress through the steps.
+For each module, copy `terraform.tfvars.example` → `terraform.tfvars` and fill in the placeholders. Cross-module ARNs (Aurora, secrets, worker outputs) get filled in as you progress through the steps.
 
 ### Step 1 — Permissions + Secrets Manager + CMK
 
@@ -258,8 +272,7 @@ worker outputs) get filled in as you progress through the steps.
 ./scripts/deploy_aws.sh permissions
 ```
 
-Then seed the two secret values the script prints (one-time per
-deploy):
+Then seed the two secret values the script prints (one-time per deploy):
 ```bash
 aws secretsmanager put-secret-value \
   --secret-id devforge/openrouter-api-key \
@@ -283,9 +296,7 @@ aws secretsmanager describe-secret --secret-id devforge/openrouter-api-key \
 ./scripts/deploy_aws.sh vectors       # creates the S3 Vector bucket DevForge's RAG uses
 ```
 
-Per-tenant vector indexes (`tenant_<id>_codebase`) are created on demand
-the first time `scripts.index_repo` runs against that tenant — no
-upfront global index needed.
+Per-tenant vector indexes (`tenant_<id>_codebase`) are created on demand the first time `scripts.index_repo` runs against that tenant — no upfront global index needed.
 
 ### Step 3 — Aurora Serverless v2 + migrations
 
@@ -293,20 +304,15 @@ upfront global index needed.
 ./scripts/deploy_aws.sh database      # ~3 min — cluster boot
 ```
 
-The subcommand applies the four schema migrations against Aurora
-automatically once the cluster is `available`. The runner is
-idempotent: re-runs after a manual schema tweak skip already-applied
-columns instead of crashing.
+The subcommand applies the four schema migrations against Aurora automatically once the cluster is `available`. The runner is idempotent: re-runs after a manual schema tweak skip already-applied columns instead of crashing.
 
 ### Step 4 — Worker Fargate cluster
 
 ```bash
-./scripts/deploy_aws.sh worker        # builds + pushes worker image, applies 6_worker
+./scripts/deploy_aws.sh worker        # builds + pushes worker image, applies 4_worker
 ```
 
-This step propagates `LANGFUSE_*` from your shell env into the task
-definition. If you skipped Step 0's LangFuse setup, the values stay
-empty and tracing silently no-ops.
+This step propagates `LANGFUSE_*` from your shell env into the task definition. If you skipped Step 0's LangFuse setup, the values stay empty and tracing silently no-ops.
 
 ### Step 5 — Control plane Lambda + API Gateway
 
@@ -315,28 +321,23 @@ empty and tracing silently no-ops.
 ```
 
 This step automatically wires:
-- 6 outputs from `6_worker` (cluster name, task def, subnets, sg, role
-  ARNs) → `7_control_plane` via `TF_VAR_*` so the Lambda can
-  `ecs.run_task()` against the worker cluster (path #7).
+- 6 outputs from `4_worker` (cluster name, task def, subnets, sg, role ARNs) → `5_control_plane` via `TF_VAR_*` so the Lambda can `ecs.run_task()` against the worker cluster.
 - `CLERK_JWKS_URL` from your shell env → Lambda environment.
 
 After it completes, capture the API endpoint:
 ```bash
-API_URL=$(cd terraform/7_control_plane && terraform output -raw api_endpoint)
+API_URL=$(cd terraform/5_control_plane && terraform output -raw api_endpoint)
 echo "$API_URL"  # https://abc123.execute-api.us-east-1.amazonaws.com
 ```
 
 ### Step 6 — Onboard your tenant + index the demo repo
 
-The control plane is up but has no tenants yet. Load the deployed
-state into your shell once, then run the onboarding scripts:
+The control plane is up but has no tenants yet. Load the deployed state into your shell once, then run the onboarding scripts:
 
 ```bash
 eval "$(./scripts/aws_env.sh)"
 
-# Now `DEVFORGE_BACKEND=aws`, `CONTROL_PLANE_API`, `AURORA_*`, and
-# `VECTOR_BUCKET` are all exported. Combined with `.env.local` for keys
-# and tokens, every script "just works" against the deployed stack.
+# Now `DEVFORGE_BACKEND=aws`, `CONTROL_PLANE_API`, `AURORA_*`, and `VECTOR_BUCKET` are all exported. Combined with `.env.local` for keys and tokens, every script "just works" against the deployed stack.
 
 uv run python -m scripts.install_github_app
 
@@ -348,9 +349,7 @@ uv run python -m scripts.populate_demo_repo 1
 uv run python -m scripts.index_repo 1
 ```
 
-`scripts/aws_env.sh` reads the live Terraform state every call, so any
-re-apply that rotates a secret suffix is auto-picked-up — re-source
-the helper, no other changes needed.
+`scripts/aws_env.sh` reads the live Terraform state every call, so any re-apply that rotates a secret suffix is auto-picked-up — re-source the helper, no other changes needed.
 
 ### Step 7 — Frontend
 
@@ -368,9 +367,7 @@ Then:
 ./scripts/deploy_aws.sh frontend      # TF apply, npm build, S3 sync, CloudFront invalidation
 ```
 
-The script prints the live URL (e.g.
-`https://d1234.cloudfront.net`). Sign in via Clerk, click **+ New
-ticket**, watch a Fargate task spin up.
+The script prints the live URL (e.g. `https://d1234.cloudfront.net`). Sign in via Clerk, click **+ New ticket**, watch a Fargate task spin up.
 
 ### Step 8 — Verify end-to-end
 
@@ -386,8 +383,7 @@ curl -I https://<cloudfront-domain>/jobs/123
 # Expect: HTTP/2 200 (not 404 — CloudFront's custom_error_response rewrites)
 
 # 4. LangFuse trace deep-link:
-# Click "view trace ↗" on any /jobs/[id] page. Should land on a populated
-# trace tree (Lead → Backend → QA spans).
+# Click "view trace ↗" on any /jobs/[id] page. Should land on a populated trace tree (Lead → Backend → QA spans).
 ```
 
 ### One-shot variants
@@ -399,9 +395,7 @@ curl -I https://<cloudfront-domain>/jobs/123
 ./scripts/deploy_aws.sh destroy     # tear it all down (8 → 7 → … → 1, plus ECR)
 ```
 
-`destroy` schedules the CMK for 7-day deletion (the AWS minimum); to
-recover within that window, `aws kms cancel-key-deletion --key-id
-alias/devforge-secrets`.
+`destroy` schedules the CMK for 7-day deletion (the AWS minimum); to recover within that window, `aws kms cancel-key-deletion --key-id alias/devforge-secrets`.
 
 ### Common deploy errors
 
@@ -426,7 +420,7 @@ Plus:
 - **Control plane dual-auth**: every gated endpoint accepts a Clerk JWT (browser) OR an admin token (CLI). Browser-facing admin operations (`POST /approvals/run`) authorize via Clerk JWT against `tenants.clerk_user_id` / `clerk_org_id` — no admin secret ever leaves the server.
 - **Customer-managed KMS** (`alias/devforge-secrets`): both Secrets Manager entries (OpenRouter key, GitHub App PEM) are encrypted with a CMK provisioned by `terraform/1_permissions`. Annual rotation is on; the consumer roles get scoped `kms:Decrypt` via a `kms:ViaService` condition so the key can only decrypt through Secrets Manager. Path B (admin pre-creates the key, you pass `var.kms_cmk_arn`) is supported for environments where the deploying user lacks `kms:CreateKey`.
 
-## Not production-ready (v1 trade-offs)
+## TODO v2 (v1 trade-offs)
 
 - Egress allowlist on AWS is port-443-only via Security Group (not hostname-aware) — true allowlist needs AWS Network Firewall.
 - Local mode has no OS-level egress enforcement; `is_host_allowed` is documentation, not a kernel filter.
@@ -435,14 +429,3 @@ Plus:
 - Semgrep + detect-secrets in local mode; gitleaks binary in the Fargate Dockerfile (AWS).
 - POST /jobs spawns `scripts.run_ticket` as a local subprocess. AWS deploy of ticket submission requires SQS dispatch (Lambda's 15-min ceiling won't survive a full crew run). The watch-only path (CLI submits, browser tails) is fully AWS-ready today.
 - Frontend uses static export (no Next API routes / SSR / middleware). Future polish requiring SSR would need a runtime Next host (Vercel / Amplify).
-
-## Prerequisites
-
-- AWS CLI configured (`aiengineer` IAM user) — only required for AWS-mode deploys
-- Docker Desktop running — only required to build images for AWS push
-- `uv` installed
-- Node 20+ and `npm` (frontend dev server + production build)
-- OpenRouter API key (https://openrouter.ai)
-- GitHub App created (one-time setup; see DEMO.md)
-- Clerk application (https://dashboard.clerk.com) — publishable + secret keys + JWKS URL
-- Optional: LangFuse cloud project for trace observability + the `view trace ↗` deep-link
