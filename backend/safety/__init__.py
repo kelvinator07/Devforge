@@ -13,7 +13,7 @@ from .denylist import (
 from .injection_scrub import scrub
 from .approval import list_pending, mint, verify_and_consume
 from .scope import EGRESS_ALLOWLIST, ensure_path_in_scope, is_host_allowed
-from .secret_redact import _SECRET_PATTERNS, redact_secrets, scan_secrets
+from .secret_redact import redact_secrets, scan_secrets
 
 __all__ = [
     "Severity",

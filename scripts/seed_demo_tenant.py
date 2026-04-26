@@ -11,7 +11,6 @@ After the repo exists and the DevForge App has been installed on it, run
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import tempfile

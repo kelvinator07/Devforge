@@ -5,7 +5,6 @@ gets a fresh approval_tokens table seeded by the real migrations.
 """
 from __future__ import annotations
 
-import pytest
 
 
 def test_mint_returns_raw_token(tmp_db) -> None:

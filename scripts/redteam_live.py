@@ -20,7 +20,7 @@ import io
 import json
 import sys
 from contextlib import redirect_stdout
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv

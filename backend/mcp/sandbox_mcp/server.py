@@ -143,7 +143,6 @@ def run_coverage(min_pct: int = 50) -> dict:
     Requires `coverage` to be installed in the worktree's env. Falls back to
     plain pytest if coverage isn't available.
     """
-    cwd = _cwd()
     # Best-effort: run via uv so the project's own deps are used.
     cmd = ["uv", "run", "coverage", "run", "-m", "pytest", "-q"]
     r = _run(cmd)

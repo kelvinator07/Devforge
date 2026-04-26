@@ -9,26 +9,19 @@ to the `job_events` table so a frontend can replay them later.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import sys
-import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
 
 import httpx
 from agents import gen_trace_id, trace as _agents_trace
 from agents.tracing import get_trace_provider as _get_trace_provider
 
 from backend.common import get_backend
-from backend.cost.tracker import CostCapExceeded, default_cap, end_job, start_job
+from backend.cost.tracker import default_cap, end_job, start_job
 from backend.ingest.index_tenant_repo import search_codebase
 from backend.safety import (
     classify_plan_step,
-    is_forbidden,
-    list_pending,
     scan_secrets,
     scrub,
     verify_and_consume,

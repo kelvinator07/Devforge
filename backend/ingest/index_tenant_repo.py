@@ -5,7 +5,6 @@ AWS mode:     S3 Vectors index       `tenant-<id>-codebase`
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
