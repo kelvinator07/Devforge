@@ -78,7 +78,23 @@ def test_verify_rejects_when_no_tokens(tmp_db) -> None:
 
 def test_strict_job_id_scoping(tmp_db) -> None:
     """A token minted for job_id=42 should only verify with that job_id (or None)."""
+    from backend.common import get_backend
     from backend.safety.approval import mint, verify_and_consume
+
+    # FK chain: approval_tokens.job_id → jobs.id → repos.id → tenants.id.
+    # SQLite has PRAGMA foreign_keys=ON in LocalBackend, so seed the chain.
+    db = get_backend().db
+    db.execute(
+        "INSERT INTO tenants (id, name, github_owner, github_installation_id) "
+        "VALUES (1, 't', 'o', 1)"
+    )
+    db.execute(
+        "INSERT INTO repos (id, tenant_id, full_name) VALUES (1, 1, 'o/r')"
+    )
+    db.execute(
+        "INSERT INTO jobs (id, tenant_id, repo_id, ticket_title, ticket_body) "
+        "VALUES (42, 1, 1, 't', 'b')"
+    )
 
     cmd = "run_job:1:DEMO-1:strict"
     raw = mint(job_id=42, command=cmd)

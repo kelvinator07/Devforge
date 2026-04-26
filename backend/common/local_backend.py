@@ -25,7 +25,8 @@ class SQLiteDB(DB):
     """
 
     def __init__(self, db_path: str | None = None):
-        self.path = Path(db_path or (DATA_DIR / "devforge.db"))
+        env_path = os.environ.get("DEVFORGE_DB_PATH")
+        self.path = Path(db_path or env_path or (DATA_DIR / "devforge.db"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _conn(self) -> sqlite3.Connection:
