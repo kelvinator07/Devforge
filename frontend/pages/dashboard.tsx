@@ -22,8 +22,11 @@ export default function Dashboard() {
 type StatusFilter = "all" | "running" | "pr_opened" | "failed" | "awaiting_approval";
 
 function DashboardInner() {
-  const tenant = useApi<Tenant>("/tenants/1");
-  const jobs = useApi<{ jobs: Job[] }>("/jobs?tenant_id=1&limit=50", { pollMs: 3000 });
+  const tenant = useApi<Tenant>("/tenants/me");
+  const jobs = useApi<{ jobs: Job[] }>(
+    tenant.data ? `/jobs?tenant_id=${tenant.data.id}&limit=50` : null,
+    { pollMs: 3000 },
+  );
   const [newTicketOpen, setNewTicketOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
@@ -56,7 +59,21 @@ function DashboardInner() {
         <UserButton />
       </header>
 
-      {tenant.error && <ErrorCard msg={tenant.error} />}
+      {tenant.error && (
+        tenant.error.startsWith("404") ? (
+          <div className="mb-8 rounded border border-amber-700/40 bg-amber-500/5 p-4 text-sm text-amber-200">
+            <div className="font-medium">No tenant linked to this account.</div>
+            <div className="mt-1 text-xs text-zinc-400">
+              Run the backfill once to link a tenant to your Clerk identity:
+              <pre className="mt-2 select-all rounded bg-zinc-950/60 p-2 font-mono text-[11px] text-zinc-300">
+{`uv run python -m scripts.link_tenant_clerk_identity <tenant_id> --user <your_clerk_user_id>`}
+              </pre>
+            </div>
+          </div>
+        ) : (
+          <ErrorCard msg={tenant.error} />
+        )
+      )}
       {tenant.data && (
         <section className="mb-8 rounded border border-zinc-800 bg-[var(--card)] p-4">
           <div className="text-xs uppercase tracking-wide text-zinc-500">tenant</div>

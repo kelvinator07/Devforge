@@ -108,6 +108,23 @@ case "$cmd" in
     tf_apply terraform/7_control_plane
     ;;
 
+  frontend)
+    # Static-export → S3 → CloudFront. Requires next.config.ts with output:"export".
+    tf_apply terraform/8_frontend
+    BUCKET=$(cd terraform/8_frontend && terraform output -raw bucket_name)
+    DIST=$(cd terraform/8_frontend && terraform output -raw cloudfront_distribution_id)
+    SITE=$(cd terraform/8_frontend && terraform output -raw site_url)
+    echo "== building static frontend (uses frontend/.env.production for NEXT_PUBLIC_*) =="
+    (cd frontend && npm install && npm run build)
+    echo "== syncing out/ to s3://${BUCKET}/ =="
+    aws s3 sync frontend/out/ "s3://${BUCKET}/" --delete --region "$AWS_REGION"
+    echo "== invalidating CloudFront cache =="
+    aws cloudfront create-invalidation \
+      --distribution-id "$DIST" --paths "/*" \
+      --query "Invalidation.Id" --output text
+    echo "deployed -> $SITE"
+    ;;
+
   all)
     bash "$0" permissions
     bash "$0" sagemaker
@@ -115,9 +132,11 @@ case "$cmd" in
     bash "$0" database
     bash "$0" worker
     bash "$0" control-plane
+    bash "$0" frontend
     ;;
 
   destroy)
+    tf_destroy terraform/8_frontend || true
     tf_destroy terraform/7_control_plane || true
     tf_destroy terraform/5_database || true
     tf_destroy terraform/6_worker || true
@@ -132,7 +151,7 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: $0 {all|permissions|sagemaker|ingestion|database|worker|control-plane|destroy}"
+    echo "usage: $0 {all|permissions|sagemaker|ingestion|database|worker|control-plane|frontend|destroy}"
     exit 1
     ;;
 esac

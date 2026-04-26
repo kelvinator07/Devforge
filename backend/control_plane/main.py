@@ -88,6 +88,31 @@ def _check_admin(token: str | None) -> None:
         raise HTTPException(403, "invalid admin token")
 
 
+def _authorize_tenant_admin(auth: dict, tenant_id: int) -> None:
+    """Caller must be either (a) admin via X-Admin-Token, (b) anonymous via the
+    DEVFORGE_AUTH_DISABLED local escape hatch, or (c) a Clerk user whose
+    user_id/org_id maps to this tenant. Used by browser-facing admin
+    operations (#B2) so the frontend never needs to ship an admin secret.
+    """
+    actor = auth.get("actor")
+    if actor in ("admin", "anonymous"):
+        return
+    if actor != "user":
+        raise HTTPException(401, "admin operation requires Clerk session or admin token")
+    rows = _backend.db.execute(
+        "SELECT clerk_user_id, clerk_org_id FROM tenants WHERE id = :t",
+        {"t": tenant_id},
+    )
+    if not rows:
+        raise HTTPException(404, "tenant not found")
+    t = rows[0]
+    if t["clerk_org_id"] and t["clerk_org_id"] == auth.get("org_id"):
+        return
+    if t["clerk_user_id"] and t["clerk_user_id"] == auth.get("sub"):
+        return
+    raise HTTPException(403, "you are not a member of this tenant")
+
+
 def dual_auth(
     authorization: str | None = Header(default=None),
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
@@ -128,7 +153,16 @@ def dual_auth(
                 "Confirm CLERK_JWKS_URL points at YOUR Clerk app, not the "
                 ".env.example placeholder.",
             )
-        return {"actor": "user", "via": "clerk", "sub": decoded.get("sub")}
+        return {
+            "actor": "user",
+            "via": "clerk",
+            "sub": decoded.get("sub"),
+            # Clerk Organizations claims (None when Orgs aren't enabled or the
+            # user is signed into a personal workspace). #B1 uses these to
+            # resolve the caller's tenant via /tenants/me.
+            "org_id": decoded.get("org_id"),
+            "org_role": decoded.get("org_role"),
+        }
 
     raise HTTPException(
         401,
@@ -161,6 +195,10 @@ class OnboardRequest(BaseModel):
     repo_full_name: str = Field(..., pattern=r"^[^/]+/[^/]+$")
     default_branch: str = "main"
     installation_id: int
+    # B1: optional Clerk identity binding so /tenants/me resolves the tenant
+    # from a signed-in user's JWT. Both nullable for backward compat.
+    clerk_user_id: str | None = None
+    clerk_org_id: str | None = None
 
 
 class SubmitJobRequest(BaseModel):
@@ -197,14 +235,29 @@ def onboard_tenant(req: OnboardRequest, _auth: dict = Depends(dual_auth)):
     if existing:
         tenant_id = existing[0]["id"]
         logger.info("tenant exists for installation_id=%s -> %s", req.installation_id, tenant_id)
+        # Idempotently update Clerk identity if the caller provided one and
+        # the row didn't have one yet — useful for backfill via re-onboard.
+        if req.clerk_user_id or req.clerk_org_id:
+            _backend.db.execute(
+                """
+                UPDATE tenants
+                SET clerk_user_id = COALESCE(clerk_user_id, :u),
+                    clerk_org_id  = COALESCE(clerk_org_id,  :o)
+                WHERE id = :t
+                """,
+                {"u": req.clerk_user_id, "o": req.clerk_org_id, "t": tenant_id},
+            )
     else:
         rows = _backend.db.execute(
             """
-            INSERT INTO tenants (name, github_owner, github_installation_id)
-            VALUES (:name, :owner, :inst)
+            INSERT INTO tenants (name, github_owner, github_installation_id,
+                                 clerk_user_id, clerk_org_id)
+            VALUES (:name, :owner, :inst, :u, :o)
             RETURNING id
             """,
-            {"name": req.tenant_name, "owner": req.github_owner, "inst": req.installation_id},
+            {"name": req.tenant_name, "owner": req.github_owner,
+             "inst": req.installation_id,
+             "u": req.clerk_user_id, "o": req.clerk_org_id},
         )
         tenant_id = rows[0]["id"]
         logger.info("created tenant %s for %s", tenant_id, req.tenant_name)
@@ -222,8 +275,8 @@ def onboard_tenant(req: OnboardRequest, _auth: dict = Depends(dual_auth)):
     return {"tenant_id": tenant_id, "repo_full_name": req.repo_full_name}
 
 
-@app.get("/tenants/{tenant_id}")
-def get_tenant(tenant_id: int, _auth: dict = Depends(dual_auth)):
+def _fetch_tenant(tenant_id: int) -> dict:
+    """Shared loader for tenant + repos. Raises 404 if missing."""
     rows = _backend.db.execute(
         """
         SELECT t.id, t.name, t.github_owner, t.github_installation_id, t.created_at,
@@ -247,6 +300,36 @@ def get_tenant(tenant_id: int, _auth: dict = Depends(dual_auth)):
             for r in rows if r.get("repo_id") is not None
         ],
     }
+
+
+@app.get("/tenants/me")
+def get_current_tenant(_auth: dict = Depends(dual_auth)):
+    """Resolve the requester's tenant from their Clerk JWT. Prefers org-scoped
+    binding (clerk_org_id) and falls back to user-scoped (clerk_user_id) for
+    solo accounts where Clerk Organizations aren't enabled."""
+    if _auth.get("actor") != "user":
+        raise HTTPException(403, "GET /tenants/me requires a Clerk session")
+    org_id = _auth.get("org_id")
+    user_id = _auth.get("sub")
+    rows: list = []
+    if org_id:
+        rows = _backend.db.execute(
+            "SELECT id FROM tenants WHERE clerk_org_id = :o", {"o": org_id})
+    if not rows and user_id:
+        rows = _backend.db.execute(
+            "SELECT id FROM tenants WHERE clerk_user_id = :u", {"u": user_id})
+    if not rows:
+        raise HTTPException(
+            404,
+            "no tenant configured for this Clerk identity. "
+            "Run scripts/link_tenant_clerk_identity.py to backfill.",
+        )
+    return _fetch_tenant(rows[0]["id"])
+
+
+@app.get("/tenants/{tenant_id}")
+def get_tenant(tenant_id: int, _auth: dict = Depends(dual_auth)):
+    return _fetch_tenant(tenant_id)
 
 
 # ============================================================================
@@ -480,14 +563,17 @@ def submit_job(req: SubmitJobRequest, _auth: dict = Depends(dual_auth)):
 @app.post("/approvals/run", status_code=202)
 def mint_approval_and_run(
     req: ApproveAndRunRequest,
-    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    _auth: dict = Depends(dual_auth),
 ):
-    """Admin-gated: mint a ticket-bound approval token AND immediately
-    spawn a fresh run of the ticket. Returns the new job_id so the caller
-    can navigate straight to its live event stream — no copy-paste of
-    the token to a CLI.
+    """Mint a ticket-bound approval token AND immediately spawn a fresh run.
+    Returns the new job_id so the caller can navigate straight to its live
+    event stream — no copy-paste of the token to a CLI.
+
+    Authorization (#B2): either an admin token (CLI tooling) OR a Clerk user
+    whose JWT identity maps to req.tenant_id via tenants.clerk_user_id /
+    tenants.clerk_org_id. The browser never ships DEVFORGE_ADMIN_TOKEN.
     """
-    _check_admin(x_admin_token)
+    _authorize_tenant_admin(_auth, req.tenant_id)
     from backend.safety import mint
     token = mint(command=req.command)
     job_id, _log = _spawn_run_ticket(

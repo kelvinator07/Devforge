@@ -1,0 +1,8 @@
+aws_region  = "us-east-1"
+bucket_name = "devforge-frontend"
+
+# Optional: set the three below to attach a custom domain. Leave empty to
+# serve via the CloudFront default domain.
+domain              = ""
+acm_certificate_arn = ""  # ACM cert MUST be in us-east-1
+route53_zone_id     = ""

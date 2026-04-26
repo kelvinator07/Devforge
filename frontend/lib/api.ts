@@ -10,7 +10,6 @@ import { useAuth } from "@clerk/nextjs";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export const API = process.env.NEXT_PUBLIC_DEVFORGE_API || "http://localhost:8001";
-export const ADMIN_TOKEN = process.env.NEXT_PUBLIC_DEVFORGE_ADMIN_TOKEN || "";
 export const LANGFUSE_HOST = process.env.NEXT_PUBLIC_LANGFUSE_HOST || "https://cloud.langfuse.com";
 export const LANGFUSE_PROJECT_ID = process.env.NEXT_PUBLIC_LANGFUSE_PROJECT_ID || "";
 
@@ -141,25 +140,27 @@ export async function submitTicket(
 }
 
 
-/** POST /approvals/run — admin-token-gated. Mints a token AND immediately
- * spawns a fresh run of the ticket; returns the new job_id so the caller
- * can navigate straight to its live event stream. */
-export async function mintApprovalAndRun(req: {
-  command: string;
-  tenant_id: number;
-  ticket_title: string;
-  ticket_body: string;
-  ticket_id?: string;
-}): Promise<{ token: string; command: string; job_id: number }> {
-  if (!ADMIN_TOKEN) {
-    throw new Error("NEXT_PUBLIC_DEVFORGE_ADMIN_TOKEN not set in frontend .env.local");
-  }
+/** POST /approvals/run — mints a token AND immediately spawns a fresh run of
+ * the ticket; returns the new job_id. Authorized by the Clerk JWT (#B2) — no
+ * admin token leaves the browser. The backend resolves tenant membership from
+ * the JWT's `sub` / `org_id` claims against tenants.clerk_user_id /
+ * tenants.clerk_org_id. */
+export async function mintApprovalAndRun(
+  getToken: () => Promise<string | null>,
+  req: {
+    command: string;
+    tenant_id: number;
+    ticket_title: string;
+    ticket_body: string;
+    ticket_id?: string;
+  },
+): Promise<{ token: string; command: string; job_id: number }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const tok = await getToken();
+  if (tok) headers["Authorization"] = `Bearer ${tok}`;
   const r = await fetch(`${API}/approvals/run`, {
     method: "POST",
-    headers: {
-      "X-Admin-Token": ADMIN_TOKEN,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify(req),
   });
   if (!r.ok) throw new Error(`mint+run failed: ${r.status} ${await r.text()}`);

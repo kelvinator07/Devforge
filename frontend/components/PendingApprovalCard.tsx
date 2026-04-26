@@ -1,3 +1,4 @@
+import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/router";
 import { useState } from "react";
 import toast from "react-hot-toast";
@@ -7,6 +8,7 @@ import { mintApprovalAndRun, type PendingApproval } from "../lib/api";
 type Props = { item: PendingApproval };
 
 export function PendingApprovalCard({ item }: Props) {
+  const { getToken } = useAuth();
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -19,7 +21,7 @@ export function PendingApprovalCard({ item }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const { job_id } = await mintApprovalAndRun({
+      const { job_id } = await mintApprovalAndRun(getToken, {
         command: item.approval_command,
         tenant_id: item.tenant_id,
         ticket_title: item.ticket_title,
