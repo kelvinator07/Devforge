@@ -49,3 +49,26 @@ variable "langfuse_host" {
   type        = string
   default     = "https://cloud.langfuse.com"
 }
+
+# AWSBackend dependencies — required for the orchestrator running in the
+# Fargate container. RAG store + Aurora job-event writes.
+variable "vector_bucket_name" {
+  description = "S3 Vector bucket name (devforge-vectors-<account>) for the orchestrator's RAG store."
+  type        = string
+}
+
+variable "aurora_cluster_arn" {
+  description = "Aurora cluster ARN (output of 5_database). Worker writes job events here."
+  type        = string
+}
+
+variable "aurora_secret_arn" {
+  description = "Aurora credentials secret ARN (output of 5_database)."
+  type        = string
+}
+
+variable "devforge_admin_token" {
+  description = "Admin token. The worker's orchestrator uses admin_headers() to call back into the control plane (tenant lookup, install token, approval consume); without this token those callbacks 401."
+  type        = string
+  sensitive   = true
+}

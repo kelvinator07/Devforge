@@ -15,8 +15,10 @@ from backend.ingest.chunker import Chunk, chunk_file, walk_repo
 
 
 def index_name_for(tenant_id: int) -> str:
-    # Chroma + S3 Vectors both accept [a-zA-Z0-9_-]
-    return f"tenant_{tenant_id}_codebase"
+    # S3 Vectors index names allow only lowercase letters, digits, and
+    # hyphens (no underscores). Chroma is more permissive so hyphens
+    # work for both backends.
+    return f"tenant-{tenant_id}-codebase"
 
 
 def clone_with_token(repo_full_name: str, installation_token: str, dest: Path) -> None:

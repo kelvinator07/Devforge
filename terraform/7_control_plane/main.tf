@@ -141,6 +141,19 @@ resource "aws_lambda_function" "control_plane" {
       # Clerk JWT validation. Empty → admin-token-only auth (CLI works,
       # browser sign-in 503s on protected endpoints).
       CLERK_JWKS_URL = var.clerk_jwks_url
+
+      # AWSBackend's eager init pulls every component (db, secrets, embedder,
+      # vectors). The Lambda doesn't issue vector queries directly but the
+      # env var must be set so import succeeds.
+      VECTOR_BUCKET = var.vector_bucket_name
+
+      # Admin token for /tenants/onboard, /approvals POST, and CLI tooling.
+      # The dual_auth helper rejects every request when this is empty.
+      DEVFORGE_ADMIN_TOKEN = var.devforge_admin_token
+
+      # Comma-separated CORS allowlist. Deploy script appends the
+      # CloudFront site_url after 8_frontend is up.
+      DEVFORGE_CORS_ORIGINS = var.cors_origins
     }
   }
 

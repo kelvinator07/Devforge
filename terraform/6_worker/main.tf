@@ -116,6 +116,37 @@ resource "aws_iam_role_policy" "task_inline" {
 }
 
 # ========================================
+# Aurora Data API access — orchestrator writes job_events / jobs.
+# Mirrors 7_control_plane.lambda_aurora.
+# ========================================
+resource "aws_iam_role_policy" "task_aurora_db_access" {
+  name = "devforge-worker-aurora"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "rds-data:ExecuteStatement",
+          "rds-data:BatchExecuteStatement",
+          "rds-data:BeginTransaction",
+          "rds-data:CommitTransaction",
+          "rds-data:RollbackTransaction",
+        ]
+        Resource = var.aurora_cluster_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = var.aurora_secret_arn
+      },
+    ]
+  })
+}
+
+# ========================================
 # Security group — port-443-only egress allowlist (v1).
 # v2: replace with AWS Network Firewall for DNS-based hostname allowlisting.
 # ========================================
@@ -166,6 +197,14 @@ resource "aws_ecs_task_definition" "worker" {
       # The control plane also forwards this via containerOverrides at
       # run-task time — set here so standalone `aws ecs run-task` works too.
       { name = "CONTROL_PLANE_API", value = var.control_plane_api },
+      # AWSBackend dependencies — orchestrator writes job events into
+      # Aurora and reads/writes the per-tenant S3 Vector index.
+      { name = "VECTOR_BUCKET", value = var.vector_bucket_name },
+      { name = "AURORA_CLUSTER_ARN", value = var.aurora_cluster_arn },
+      { name = "AURORA_SECRET_ARN", value = var.aurora_secret_arn },
+      { name = "AURORA_DATABASE", value = "devforge" },
+      # Admin token used by orchestrator's httpx callbacks to the control plane.
+      { name = "DEVFORGE_ADMIN_TOKEN", value = var.devforge_admin_token },
       # Optional observability — empty strings cleanly disable LangFuse.
       { name = "LANGFUSE_PUBLIC_KEY", value = var.langfuse_public_key },
       { name = "LANGFUSE_SECRET_KEY", value = var.langfuse_secret_key },

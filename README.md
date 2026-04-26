@@ -154,9 +154,8 @@ frontend/          Next.js 16 + Clerk + Tailwind v4 dashboard
   components/
     NewTicketModal.tsx, PendingApprovalCard.tsx, EventCard.tsx, StatusBadge.tsx
 terraform/
-  1_permissions/   Secrets Manager (OpenRouter key, GitHub App PEM) + IAM policy
+  1_permissions/   Secrets Manager (OpenRouter key, GitHub App PEM) + IAM policy + CMK
   2_sagemaker/     Embedding endpoint
-  3_ingestion/     S3 Vectors + ingest Lambda + API Gateway
   5_database/      Aurora Serverless v2 with Data API
   6_worker/        ECS Fargate + 443-only egress SG
   7_control_plane/ Control plane Lambda + HTTP API
@@ -277,12 +276,16 @@ aws secretsmanager describe-secret --secret-id devforge/openrouter-api-key \
 # Expect: arn:aws:kms:…:key/…   (NOT alias/aws/secretsmanager)
 ```
 
-### Step 2 — SageMaker embedding endpoint + S3 Vectors index
+### Step 2 — SageMaker embedding endpoint + S3 Vector bucket
 
 ```bash
 ./scripts/deploy_aws.sh sagemaker     # ~5 min — endpoint cold-start
-./scripts/deploy_aws.sh ingestion     # also creates the S3 Vector bucket+index
+./scripts/deploy_aws.sh vectors       # creates the S3 Vector bucket DevForge's RAG uses
 ```
+
+Per-tenant vector indexes (`tenant_<id>_codebase`) are created on demand
+the first time `scripts.index_repo` runs against that tenant — no
+upfront global index needed.
 
 ### Step 3 — Aurora Serverless v2 + migrations
 
@@ -325,22 +328,29 @@ echo "$API_URL"  # https://abc123.execute-api.us-east-1.amazonaws.com
 
 ### Step 6 — Onboard your tenant + index the demo repo
 
-The control plane is up but has no tenants yet. Run the onboarding
-script against the deployed API:
+The control plane is up but has no tenants yet. Load the deployed
+state into your shell once, then run the onboarding scripts:
+
 ```bash
-CONTROL_PLANE_API="$API_URL" \
-  uv run python -m scripts.install_github_app
+eval "$(./scripts/aws_env.sh)"
 
-# Link your tenant to your Clerk identity (so /tenants/me resolves):
-CONTROL_PLANE_API="$API_URL" \
-  uv run python -m scripts.link_tenant_clerk_identity 1 --user user_<your-id>
+# Now `DEVFORGE_BACKEND=aws`, `CONTROL_PLANE_API`, `AURORA_*`, and
+# `VECTOR_BUCKET` are all exported. Combined with `.env.local` for keys
+# and tokens, every script "just works" against the deployed stack.
 
-# Seed the demo repo + RAG index (against AWS this time):
-DEVFORGE_BACKEND=aws \
-  uv run python -m scripts.populate_demo_repo 1
-DEVFORGE_BACKEND=aws \
-  uv run python -m scripts.index_repo 1
+uv run python -m scripts.install_github_app
+
+# Link your tenant to your Clerk identity so /tenants/me resolves:
+uv run python -m scripts.link_tenant_clerk_identity 1 --user user_<your-id>
+
+# Seed the demo repo + RAG index against AWS:
+uv run python -m scripts.populate_demo_repo 1
+uv run python -m scripts.index_repo 1
 ```
+
+`scripts/aws_env.sh` reads the live Terraform state every call, so any
+re-apply that rotates a secret suffix is auto-picked-up — re-source
+the helper, no other changes needed.
 
 ### Step 7 — Frontend
 

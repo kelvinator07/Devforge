@@ -2,13 +2,14 @@
 # DevForge AWS deployment — codifies the Day 1-3 push sequence so it's re-runnable.
 #
 # Usage:
-#   ./scripts/deploy_aws.sh all           # apply 1,2,3,5,6,7 in order + build + push + migrate
-#   ./scripts/deploy_aws.sh permissions   # just 1_permissions
-#   ./scripts/deploy_aws.sh sagemaker     # just 2_sagemaker
-#   ./scripts/deploy_aws.sh ingestion     # build ingest lambda zip + apply 3_ingestion
+#   ./scripts/deploy_aws.sh all           # full deploy in dependency order
+#   ./scripts/deploy_aws.sh permissions   # just 1_permissions (Secrets Manager + CMK + IAM policy)
+#   ./scripts/deploy_aws.sh sagemaker     # just 2_sagemaker (embedding endpoint)
+#   ./scripts/deploy_aws.sh vectors       # creates the S3 Vector bucket worker uses for RAG
 #   ./scripts/deploy_aws.sh database      # just 5_database + run migrations
 #   ./scripts/deploy_aws.sh worker        # build + push worker image + apply 6_worker
 #   ./scripts/deploy_aws.sh control-plane # build + push cp image + apply 7_control_plane
+#   ./scripts/deploy_aws.sh frontend      # build static export + sync to S3 + invalidate CloudFront
 #   ./scripts/deploy_aws.sh destroy       # tear everything down (reverse order)
 #
 # Prereqs: aws cli signed in, docker running, uv installed.
@@ -19,6 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export DEVFORGE_BACKEND=aws
 export AWS_REGION="${AWS_REGION:-us-east-1}"
+# Every TF module declares `var.aws_region`; export it once here so individual
+# modules don't need their own tfvars line for it.
+export TF_VAR_aws_region="$AWS_REGION"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ECR_BASE="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
@@ -54,19 +58,12 @@ build_push() {
   docker push "${ECR_BASE}/${repo}:${tag}"
 }
 
-build_ingest_zip() {
-  echo "== building ingest lambda_function.zip =="
-  ( cd backend/ingest && uv sync && uv run python package.py )
-}
-
-create_s3vectors_bucket_and_index() {
+create_s3vectors_bucket() {
   local bucket="devforge-vectors-${ACCOUNT}"
-  aws s3vectors create-vector-bucket --vector-bucket-name "$bucket" --region "$AWS_REGION" 2>/dev/null || true
-  aws s3vectors create-index \
-    --vector-bucket-name "$bucket" \
-    --index-name "${VECTOR_INDEX:-financial-research}" \
-    --dimension 384 --distance-metric cosine --data-type float32 \
-    --region "$AWS_REGION" 2>/dev/null || true
+  aws s3vectors create-vector-bucket \
+    --vector-bucket-name "$bucket" --region "$AWS_REGION" 2>/dev/null \
+    && echo "created vector bucket: $bucket" \
+    || echo "vector bucket exists: $bucket"
 }
 
 cmd="${1:-}"
@@ -83,10 +80,11 @@ case "$cmd" in
     tf_apply terraform/2_sagemaker
     ;;
 
-  ingestion)
-    build_ingest_zip
-    tf_apply terraform/3_ingestion
-    create_s3vectors_bucket_and_index
+  vectors)
+    # Create the S3 Vector bucket the worker uses for RAG. Per-tenant
+    # indexes (tenant_<id>_codebase) are created on demand by
+    # `scripts.index_repo` the first time a tenant is indexed.
+    create_s3vectors_bucket
     ;;
 
   database)
@@ -106,6 +104,13 @@ case "$cmd" in
     export TF_VAR_langfuse_public_key="${LANGFUSE_PUBLIC_KEY:-}"
     export TF_VAR_langfuse_secret_key="${LANGFUSE_SECRET_KEY:-}"
     export TF_VAR_langfuse_host="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
+    # AWSBackend deps — orchestrator writes events to Aurora + reads RAG
+    # from S3 Vectors. Pulled from the existing 5_database state and
+    # derived from the AWS account id.
+    export TF_VAR_vector_bucket_name="devforge-vectors-${ACCOUNT}"
+    export TF_VAR_aurora_cluster_arn=$(cd terraform/5_database && terraform output -raw aurora_cluster_arn)
+    export TF_VAR_aurora_secret_arn=$(cd terraform/5_database && terraform output -raw aurora_secret_arn)
+    export TF_VAR_devforge_admin_token="${DEVFORGE_ADMIN_TOKEN:?DEVFORGE_ADMIN_TOKEN must be set in the host env (source .env.local)}"
     # If 7_control_plane has been deployed, pre-populate the worker task def
     # with its URL too (helps standalone `aws ecs run-task` smoke tests).
     if [ -f terraform/7_control_plane/terraform.tfstate ]; then
@@ -125,20 +130,56 @@ case "$cmd" in
     export TF_VAR_ecs_subnet_ids=$(cd "$WORKER_DIR" && terraform output -json subnet_ids)
     export TF_VAR_task_execution_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_execution_role_arn)
     export TF_VAR_task_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_role_arn)
+    # Aurora secret has a random suffix that changes on re-deploy; pull
+    # current values from 5_database state to keep tfvars from going stale.
+    export TF_VAR_aurora_cluster_arn=$(cd terraform/5_database && terraform output -raw aurora_cluster_arn)
+    export TF_VAR_aurora_secret_arn=$(cd terraform/5_database && terraform output -raw aurora_secret_arn)
     # Clerk JWKS URL for browser-side JWT validation (optional — empty
     # disables Clerk auth path; admin token still works).
     export TF_VAR_clerk_jwks_url="${CLERK_JWKS_URL:-}"
+    # AWSBackend's eager init reads VECTOR_BUCKET; control plane doesn't
+    # query vectors directly but the env var must be present.
+    export TF_VAR_vector_bucket_name="devforge-vectors-${ACCOUNT}"
+    # Admin token used by /tenants/onboard, /approvals POST, and CLI tooling.
+    export TF_VAR_devforge_admin_token="${DEVFORGE_ADMIN_TOKEN:?DEVFORGE_ADMIN_TOKEN must be set in the host env (source .env.local)}"
+    # CORS: start from the user's DEVFORGE_CORS_ORIGINS (or the localhost
+    # default), then auto-append the CloudFront site URL when 8_frontend
+    # has been deployed. The append always runs so a sourced .env.local
+    # with a localhost-only value can't accidentally suppress the prod origin.
+    CORS_BASE="${DEVFORGE_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
+    if [ -f terraform/8_frontend/terraform.tfstate ]; then
+      FRONTEND_URL=$(cd terraform/8_frontend && terraform output -raw site_url 2>/dev/null || echo "")
+      if [ -n "$FRONTEND_URL" ] && [[ "$CORS_BASE" != *"$FRONTEND_URL"* ]]; then
+        CORS_BASE="$CORS_BASE,$FRONTEND_URL"
+      fi
+    fi
+    export TF_VAR_cors_origins="$CORS_BASE"
     tf_apply terraform/7_control_plane
     ;;
 
   frontend)
     # Static-export → S3 → CloudFront. Requires next.config.ts with output:"export".
+    # Bucket names are globally unique — suffix with account id to avoid
+    # collisions on first deploy. Honors a user-provided override via tfvars.
+    export TF_VAR_bucket_name="${TF_VAR_bucket_name:-devforge-frontend-$ACCOUNT}"
     tf_apply terraform/8_frontend
     BUCKET=$(cd terraform/8_frontend && terraform output -raw bucket_name)
     DIST=$(cd terraform/8_frontend && terraform output -raw cloudfront_distribution_id)
     SITE=$(cd terraform/8_frontend && terraform output -raw site_url)
     echo "== building static frontend (uses frontend/.env.production for NEXT_PUBLIC_*) =="
+    # Next.js loads .env.local for *all* environments and it overrides
+    # .env.production — disastrous for static builds because the local
+    # `localhost:8001` API URL gets baked into the production bundle. Move
+    # it aside for the build, restore on EXIT (even on failure).
+    if [ -f frontend/.env.local ]; then
+      mv frontend/.env.local frontend/.env.local.deploy-bak
+      trap 'mv frontend/.env.local.deploy-bak frontend/.env.local 2>/dev/null || true' EXIT
+    fi
     (cd frontend && npm install && npm run build)
+    if [ -f frontend/.env.local.deploy-bak ]; then
+      mv frontend/.env.local.deploy-bak frontend/.env.local
+      trap - EXIT
+    fi
     echo "== syncing out/ to s3://${BUCKET}/ =="
     aws s3 sync frontend/out/ "s3://${BUCKET}/" --delete --region "$AWS_REGION"
     echo "== invalidating CloudFront cache =="
@@ -151,7 +192,7 @@ case "$cmd" in
   all)
     bash "$0" permissions
     bash "$0" sagemaker
-    bash "$0" ingestion
+    bash "$0" vectors
     bash "$0" database
     bash "$0" worker
     bash "$0" control-plane
@@ -163,18 +204,18 @@ case "$cmd" in
     tf_destroy terraform/7_control_plane || true
     tf_destroy terraform/5_database || true
     tf_destroy terraform/6_worker || true
-    tf_destroy terraform/3_ingestion || true
     tf_destroy terraform/2_sagemaker || true
     tf_destroy terraform/1_permissions || true
     aws ecr delete-repository --repository-name devforge-worker --region "$AWS_REGION" --force 2>/dev/null || true
     aws ecr delete-repository --repository-name devforge-control-plane --region "$AWS_REGION" --force 2>/dev/null || true
-    aws s3vectors delete-index --vector-bucket-name "devforge-vectors-${ACCOUNT}" --index-name "${VECTOR_INDEX:-financial-research}" --region "$AWS_REGION" 2>/dev/null || true
+    # Per-tenant indexes (tenant_<id>_codebase) are deleted along with the
+    # bucket; no need to enumerate them here.
     aws s3vectors delete-vector-bucket --vector-bucket-name "devforge-vectors-${ACCOUNT}" --region "$AWS_REGION" 2>/dev/null || true
     echo "DevForge AWS resources destroyed."
     ;;
 
   *)
-    echo "usage: $0 {all|permissions|sagemaker|ingestion|database|worker|control-plane|frontend|destroy}"
+    echo "usage: $0 {all|permissions|sagemaker|vectors|database|worker|control-plane|frontend|destroy}"
     exit 1
     ;;
 esac

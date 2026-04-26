@@ -1,9 +1,9 @@
 aws_region             = "us-east-1"
 ecr_repository_uri     = "808379775689.dkr.ecr.us-east-1.amazonaws.com/devforge-control-plane"
-image_tag              = "day3"
+image_tag              = "day7"
 secret_read_policy_arn = "arn:aws:iam::808379775689:policy/devforge-secret-read"
 aurora_cluster_arn     = "arn:aws:rds:us-east-1:808379775689:cluster:devforge-aurora-cluster"
-aurora_secret_arn      = "arn:aws:secretsmanager:us-east-1:808379775689:secret:devforge-aurora-credentials-59d7c977-Vn9g8M"
+aurora_secret_arn      = "arn:aws:secretsmanager:us-east-1:808379775689:secret:devforge-aurora-credentials-41e830a6-U0wwpy"
 
 # Populate AFTER creating the GitHub App in the UI (see scripts/install_github_app.py for the exact form values).
 github_app_id = "3474414"

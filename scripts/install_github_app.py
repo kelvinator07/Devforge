@@ -20,7 +20,13 @@ from dotenv import load_dotenv
 
 
 def main() -> None:
-    load_dotenv(Path(__file__).parent.parent / ".env", override=True)
+    # Match the convention used by run_ticket.py, redteam.py, etc.: prefer
+    # .env.local (gitignored, holds secrets) and fall back to .env. Without
+    # the .env.local load, DEVFORGE_ADMIN_TOKEN was missing and POST
+    # /tenants/onboard 401'd.
+    repo_root = Path(__file__).parent.parent
+    load_dotenv(repo_root / ".env.local", override=False)
+    load_dotenv(repo_root / ".env", override=False)
 
     api = os.environ.get("CONTROL_PLANE_API")
     if not api:

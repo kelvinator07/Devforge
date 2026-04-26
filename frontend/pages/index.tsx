@@ -19,9 +19,6 @@ export default function Home() {
             </button>
           </SignInButton>
         </div>
-        <p className="text-xs text-zinc-500">
-          (CLI users: skip the UI and run <code>uv run python -m scripts.run_ticket 1</code> directly.)
-        </p>
       </SignedOut>
 
       <SignedIn>
