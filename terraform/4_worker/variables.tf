@@ -25,7 +25,7 @@ variable "secret_read_policy_arn" {
 # tracing without breaking the worker.
 
 variable "control_plane_api" {
-  description = "Public URL of the control plane API Gateway. Pass via TF_VAR from 7_control_plane outputs after that module is applied."
+  description = "Public URL of the control plane API Gateway. Pass via TF_VAR from 5_control_plane outputs after that module is applied."
   type        = string
   default     = ""
 }
@@ -65,12 +65,12 @@ variable "vector_bucket_name" {
 }
 
 variable "aurora_cluster_arn" {
-  description = "Aurora cluster ARN (output of 5_database). Worker writes job events here."
+  description = "Aurora cluster ARN (output of 3_database). Worker writes job events here."
   type        = string
 }
 
 variable "aurora_secret_arn" {
-  description = "Aurora credentials secret ARN (output of 5_database)."
+  description = "Aurora credentials secret ARN (output of 3_database)."
   type        = string
 }
 

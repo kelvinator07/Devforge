@@ -117,7 +117,7 @@ resource "aws_iam_role_policy" "task_inline" {
 
 # ========================================
 # Aurora Data API access — orchestrator writes job_events / jobs.
-# Mirrors 7_control_plane.lambda_aurora.
+# Mirrors 5_control_plane.lambda_aurora.
 # ========================================
 resource "aws_iam_role_policy" "task_aurora_db_access" {
   name = "devforge-worker-aurora"

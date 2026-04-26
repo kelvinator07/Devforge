@@ -30,7 +30,7 @@ def main() -> None:
 
     api = os.environ.get("CONTROL_PLANE_API")
     if not api:
-        sys.exit("CONTROL_PLANE_API not set in .env; run terraform/7_control_plane first")
+        sys.exit("CONTROL_PLANE_API not set in .env; run terraform/5_control_plane first")
 
     print("\nDevForge GitHub App installation")
     print("=" * 60)

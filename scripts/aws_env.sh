@@ -11,8 +11,8 @@
 # Idempotent; safe to re-source after any TF apply.
 #
 # Reads:
-#   terraform/5_database/terraform.tfstate
-#   terraform/7_control_plane/terraform.tfstate
+#   terraform/3_database/terraform.tfstate
+#   terraform/5_control_plane/terraform.tfstate
 #   aws sts get-caller-identity
 #
 # Doesn't touch DEVFORGE_ADMIN_TOKEN, OPENROUTER_API_KEY, LANGFUSE_*,
@@ -23,9 +23,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-CLUSTER_ARN=$(cd terraform/5_database && terraform output -raw aurora_cluster_arn)
-SECRET_ARN=$(cd terraform/5_database && terraform output -raw aurora_secret_arn)
-API_URL=$(cd terraform/7_control_plane && terraform output -raw api_endpoint)
+CLUSTER_ARN=$(cd terraform/3_database && terraform output -raw aurora_cluster_arn)
+SECRET_ARN=$(cd terraform/3_database && terraform output -raw aurora_secret_arn)
+API_URL=$(cd terraform/5_control_plane && terraform output -raw api_endpoint)
 
 cat <<EOF
 export DEVFORGE_BACKEND=aws

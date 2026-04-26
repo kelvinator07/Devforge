@@ -128,7 +128,7 @@ resource "aws_secretsmanager_secret_version" "github_app_private_key_placeholder
 
 # ========================================
 # IAM policy document: lets a principal read the two secrets.
-# (Attached to Fargate task role in 6_worker and Lambda role in 7_control_plane)
+# (Attached to Fargate task role in 4_worker and Lambda role in 5_control_plane)
 # ========================================
 data "aws_iam_policy_document" "secret_read" {
   statement {

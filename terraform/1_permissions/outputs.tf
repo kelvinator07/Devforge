@@ -36,7 +36,7 @@ output "setup_instructions" {
            --secret-string "$(cat path/to/app.private-key.pem)"
 
       3. Attach the secret-read policy (output: secret_read_policy_arn) to
-         the Fargate task role (6_worker) and Lambda role (7_control_plane).
+         the Fargate task role (4_worker) and Lambda role (5_control_plane).
          The policy already grants kms:Decrypt on the CMK via kms:ViaService.
   EOT
 }

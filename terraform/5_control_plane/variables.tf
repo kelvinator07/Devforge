@@ -18,12 +18,12 @@ variable "secret_read_policy_arn" {
 }
 
 variable "aurora_cluster_arn" {
-  description = "Aurora cluster ARN from terraform/5_database"
+  description = "Aurora cluster ARN from terraform/3_database"
   type        = string
 }
 
 variable "aurora_secret_arn" {
-  description = "Aurora credentials secret ARN from terraform/5_database"
+  description = "Aurora credentials secret ARN from terraform/3_database"
   type        = string
 }
 
@@ -50,41 +50,41 @@ variable "devforge_admin_token" {
 }
 
 variable "cors_origins" {
-  description = "Comma-separated list of allowed origins for CORS. Defaults to localhost:3000; deploy script appends the CloudFront site_url when 8_frontend has been applied."
+  description = "Comma-separated list of allowed origins for CORS. Defaults to localhost:3000; deploy script appends the CloudFront site_url when 6_frontend has been applied."
   type        = string
   default     = "http://localhost:3000,http://127.0.0.1:3000"
 }
 
 # ============================================================================
-# Worker / ECS RunTask wiring (#7 — POST /jobs dispatches via ecs.run_task in
-# AWS mode). Pulled from terraform/6_worker outputs by scripts/deploy_aws.sh.
+# Worker / ECS RunTask wiring — POST /jobs dispatches via ecs.run_task in
+# AWS mode. Pulled from terraform/4_worker outputs by scripts/deploy_aws.sh.
 # ============================================================================
 variable "ecs_cluster_name" {
-  description = "Worker ECS cluster name (output from 6_worker)"
+  description = "Worker ECS cluster name (output from 4_worker)"
   type        = string
 }
 
 variable "ecs_task_definition_arn" {
-  description = "Worker task definition ARN (output from 6_worker)"
+  description = "Worker task definition ARN (output from 4_worker)"
   type        = string
 }
 
 variable "ecs_subnet_ids" {
-  description = "Subnet IDs to launch worker tasks in (output from 6_worker)"
+  description = "Subnet IDs to launch worker tasks in (output from 4_worker)"
   type        = list(string)
 }
 
 variable "ecs_security_group_id" {
-  description = "Security group for worker tasks (output from 6_worker)"
+  description = "Security group for worker tasks (output from 4_worker)"
   type        = string
 }
 
 variable "task_execution_role_arn" {
-  description = "Worker task EXECUTION role ARN — needed for iam:PassRole (output from 6_worker)"
+  description = "Worker task EXECUTION role ARN — needed for iam:PassRole (output from 4_worker)"
   type        = string
 }
 
 variable "task_role_arn" {
-  description = "Worker TASK role ARN — needed for iam:PassRole (output from 6_worker)"
+  description = "Worker TASK role ARN — needed for iam:PassRole (output from 4_worker)"
   type        = string
 }
