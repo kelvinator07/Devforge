@@ -1,12 +1,11 @@
 # DevForge
 
-Enterprise multi-agent engineering platform — capstone project. A 4-agent crew (EngineeringLead, BackendEngineer, FrontendEngineer, QAEngineer) plans, implements, tests, and opens a PR for any well-specified ticket against a customer's GitHub repo, inside a sandboxed worktree with strict guardrails.
+Enterprise multi-agent engineering platform — Andela AI Engineering Bootcamp capstone project. A 5-agent crew (EngineeringLead, BackendEngineer, FrontendEngineer, MigrationEngineer, QAEngineer) plans, implements, tests, and opens a PR for any well-specified ticket against a customer's GitHub repo, inside a sandboxed worktree with strict guardrails.
 
-See `/Users/kelvini/Andela-LLM-Engineering/DevForge-openrouter.md` for the original 14-day build plan, `DEMO.md` for the 5-minute demo script, and `TESTING.md` for the runnable verification walkthrough.
 
 ## Status
 
-Local-first with AWS deploy parity for every layer including the frontend. Ticket submission, one-click approval, live SSE event tail, LangFuse trace deep-link, multi-tenant scoping by Clerk identity, and S3+CloudFront frontend deploy all shipped.
+Local-first with AWS deploy parity for every layer including the frontend. Ticket submission, one-click approval, live SSE event tail, LangFuse trace deep-link, multi-tenant scoping by Clerk identity, and S3+CloudFront frontend all shipped.
 
 | Concept | Where |
 |---|---|
