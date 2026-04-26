@@ -95,6 +95,19 @@ ticket: ## Run the default demo ticket end-to-end through the crew. TENANT=1 by 
 
 # ---- Verification -------------------------------------------------------
 
+test: ## Run unit tests — pytest (backend) + vitest (frontend).
+	uv run pytest -q
+	cd frontend && npm test
+.PHONY: test
+
+test-backend: ## Run only backend pytest suite.
+	uv run pytest -q
+.PHONY: test-backend
+
+test-frontend: ## Run only frontend vitest suite.
+	cd frontend && npm test
+.PHONY: test-frontend
+
 redteam: ## Deterministic red-team — 9 guardrail tests, $0 in LLM credits.
 	$(CP) uv run python -m scripts.redteam
 .PHONY: redteam

@@ -58,3 +58,8 @@ all = [
 # ships in the AWS worker image; this group kept as an alias for
 # `uv sync --extra obs` to remain a no-op (back-compat for older docs).
 obs = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--tb=short -q"

@@ -18,6 +18,9 @@ out/
 # Tests + coverage.
 coverage/
 .nyc_output/
+**/*.test.ts
+**/*.test.tsx
+vitest.config.ts
 
 # Self.
 Dockerfile.local

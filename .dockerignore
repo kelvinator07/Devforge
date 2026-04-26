@@ -13,6 +13,9 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
+# Tests aren't needed in runtime images.
+tests/
+
 # Worktrees + job logs are runtime state.
 data/
 
