@@ -7,6 +7,25 @@ type Props = {
   ts?: string;
 };
 
+/** Pulsing placeholder card matching the collapsed EventCard shape — used on
+ * /jobs/[id] while waiting for events (Fargate cold-start ~30s). */
+export function EventCardSkeleton({ accent = "border-l-zinc-700" }: { accent?: string }) {
+  return (
+    <div
+      className={`rounded border border-zinc-800 border-l-4 ${accent} bg-[var(--card)] p-3 animate-pulse`}
+      aria-hidden="true"
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="h-3 w-32 rounded bg-zinc-800" />
+          <div className="h-4 w-3/4 rounded bg-zinc-800/60" />
+        </div>
+        <div className="h-3 w-12 rounded bg-zinc-800/60 shrink-0" />
+      </div>
+    </div>
+  );
+}
+
 const ACCENT: Record<string, string> = {
   pr_opened: "border-l-emerald-500",
   qa_gate_passed: "border-l-emerald-500",

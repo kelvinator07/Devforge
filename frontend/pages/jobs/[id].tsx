@@ -5,8 +5,16 @@ import { useEffect, useRef, useState } from "react";
 
 import { useApi, langfuseTraceUrl, type JobEvent } from "../../lib/api";
 import { tailJob, type IncomingEvent } from "../../lib/sse";
-import { EventCard } from "../../components/EventCard";
+import { EventCard, EventCardSkeleton } from "../../components/EventCard";
 import { StatusBadge } from "../../components/StatusBadge";
+
+const TERMINAL_STATUSES = new Set([
+  "pr_opened",
+  "failed",
+  "refused",
+  "awaiting_approval",
+  "approval_superseded",
+]);
 
 type JobSnapshot = {
   job: { id: number; tenant_id: number; ticket_title: string; status: string; pr_url: string | null; created_at: string };
@@ -154,12 +162,33 @@ function JobPageInner() {
             SSE error: {error}
           </div>
         )}
-        <div className="space-y-2">
-          {merged.map((e) => (
-            <EventCard key={e.id} id={e.id} type={e.type} data={e.data} />
-          ))}
-          <div ref={bottomRef} />
-        </div>
+        {(() => {
+          const jobStatus = snapshot.data?.job?.status;
+          const isTerminal =
+            closed || (jobStatus !== undefined && TERMINAL_STATUSES.has(jobStatus));
+          return (
+            <div className="space-y-2">
+              {merged.length === 0 && !error && !isTerminal && (
+                <div className="text-xs text-zinc-500">
+                  Spawning a Fargate task — first events typically arrive within
+                  ~30 seconds (cold-start). The page polls every 1.5 s.
+                </div>
+              )}
+              {merged.map((e) => (
+                <EventCard key={e.id} id={e.id} type={e.type} data={e.data} />
+              ))}
+              {!isTerminal && !error && (
+                <>
+                  <EventCardSkeleton />
+                  <EventCardSkeleton accent="border-l-zinc-800" />
+                  <EventCardSkeleton accent="border-l-zinc-800" />
+                  <EventCardSkeleton accent="border-l-zinc-800" />
+                </>
+              )}
+              <div ref={bottomRef} />
+            </div>
+          );
+        })()}
       </section>
     </div>
   );
