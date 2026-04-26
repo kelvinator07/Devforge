@@ -1,0 +1,44 @@
+# DevForge local-dev image.
+#
+# Single image runs the control plane (FastAPI on uvicorn) and serves as the
+# host for worker subprocesses (scripts.run_ticket spawned per ticket). Source
+# is bind-mounted at runtime — uvicorn --reload watches backend/ + scripts/.
+# .venv lives on a named volume so deps survive container restarts.
+#
+# Build:   docker compose build  (or `make setup`)
+# Run:     docker compose up     (or `make dev`)
+FROM python:3.12-slim-bookworm
+
+# git is required for orchestrator worktree management; curl + ca-certs for
+# httpx callbacks to OpenRouter / GitHub / Clerk JWKS / control plane self-call.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv installs into /usr/local/bin via the official installer.
+ADD https://astral.sh/uv/install.sh /uv-install.sh
+RUN sh /uv-install.sh && mv /root/.local/bin/uv /usr/local/bin/uv && rm /uv-install.sh
+
+WORKDIR /app
+
+# Pre-warm the venv during build so first-up isn't a 60-second sync. The
+# bind-mount-overlaid .venv volume gets seeded from this on first attach.
+# --all-extras pulls local (chromadb, sentence-transformers, detect-secrets,
+# semgrep), aws (boto3 for ECS dispatch), and obs (langfuse) — all needed
+# for the worker subprocess that runs in this same container.
+COPY pyproject.toml uv.lock* ./
+RUN uv sync --frozen --all-extras 2>/dev/null || uv sync --all-extras
+
+ENV PYTHONUNBUFFERED=1 \
+    DEVFORGE_BACKEND=local
+
+EXPOSE 8001
+
+# Re-sync on each boot so live edits to pyproject.toml are picked up. Then
+# uvicorn watches Python source for hot-reload (data/ excluded — see
+# scripts/local_dev.sh comment for why).
+CMD ["sh", "-c", "uv sync --frozen --all-extras 2>/dev/null || uv sync --all-extras && \
+    exec uv run uvicorn backend.control_plane.main:app \
+        --reload --host 0.0.0.0 --port 8001 \
+        --reload-dir backend --reload-dir scripts \
+        --reload-include '*.py'"]

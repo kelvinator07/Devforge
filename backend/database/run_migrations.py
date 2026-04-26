@@ -101,7 +101,22 @@ def apply_local(sql_files: list[Path]) -> None:
                 if m:
                     _sqlite_drop_not_null(conn, m.group(1), m.group(2))
                     continue
-                conn.execute(stmt)
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    # ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite —
+                    # re-runs of this script after a successful first apply
+                    # otherwise crash. Treat the column-already-exists case
+                    # as a no-op so migrations stay idempotent.
+                    if "duplicate column name" in msg:
+                        # `ALTER TABLE <t> ADD COLUMN <name> <type>` — pull <name>.
+                        col_match = re.search(
+                            r"ADD\s+COLUMN\s+(\w+)", stmt, re.IGNORECASE)
+                        col = col_match.group(1) if col_match else "?"
+                        print(f"   (sqlite) column {col}: already exists, skipping")
+                        continue
+                    raise
         conn.commit()
 
 

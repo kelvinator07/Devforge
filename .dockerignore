@@ -1,0 +1,38 @@
+# Keep `docker compose build` fast — don't ship runtime/state into the image.
+.venv/
+node_modules/
+.next/
+out/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Worktrees + job logs are runtime state.
+data/
+
+# Secrets are bind-mounted read-only at runtime, not baked in.
+secrets/
+
+# Local terraform state.
+terraform/**/.terraform/
+terraform/**/terraform.tfstate*
+terraform/**/*.plan
+
+# Editor + OS noise.
+.vscode/
+.idea/
+.DS_Store
+
+# Git history isn't needed inside the image.
+.git/
+.gitignore
+
+# Ourselves.
+Dockerfile.local
+docker-compose.yml

@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from mangum import Mangum
@@ -462,14 +462,111 @@ def list_jobs(tenant_id: int | None = None, limit: int = 50,
     return {"jobs": rows}
 
 
+_ECS_CLIENT = None  # lazy-init: only constructed in AWS mode
+
+
+def _dispatch_subprocess(
+    *, job_id: int, tenant_id: int, ticket_id: str,
+    ticket_title: str, ticket_body: str, approval_token: str | None,
+) -> str:
+    """Spawn `scripts.run_ticket` as a detached subprocess. Returns log path."""
+    import subprocess
+    env = dict(os.environ)
+    env["DEVFORGE_TICKET_ID"] = ticket_id
+    env["DEVFORGE_TICKET_TITLE"] = ticket_title
+    env["DEVFORGE_TICKET_BODY"] = ticket_body
+    env["DEVFORGE_JOB_ID"] = str(job_id)
+    if approval_token:
+        env["DEVFORGE_APPROVAL_TOKEN"] = approval_token
+
+    log_dir = _REPO_ROOT / "data" / "job_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"job_{job_id}.log"
+    log_fp = log_path.open("a")
+    subprocess.Popen(
+        ["uv", "run", "python", "-m", "scripts.run_ticket", str(tenant_id)],
+        cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=log_fp,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return str(log_path)
+
+
+def _dispatch_ecs_run_task(
+    *, job_id: int, tenant_id: int, ticket_id: str,
+    ticket_title: str, ticket_body: str, approval_token: str | None,
+    control_plane_url: str,
+) -> str:
+    """Fire one Fargate task per ticket via ecs.run_task() with containerOverrides
+    that mirror the env-var contract scripts/run_ticket.py reads. Returns a
+    pseudo-log-path so callers can stay generic across local/AWS modes.
+    """
+    global _ECS_CLIENT
+    if _ECS_CLIENT is None:
+        import boto3
+        _ECS_CLIENT = boto3.client("ecs")
+
+    cluster  = os.environ["ECS_CLUSTER"]
+    task_def = os.environ["ECS_TASK_DEFINITION"]
+    subnets  = [s for s in os.environ["ECS_SUBNETS"].split(",") if s]
+    sg       = os.environ["ECS_SECURITY_GROUP"]
+
+    env_overrides = [
+        {"name": "DEVFORGE_TICKET_ID",    "value": ticket_id},
+        {"name": "DEVFORGE_TICKET_TITLE", "value": ticket_title},
+        {"name": "DEVFORGE_TICKET_BODY",  "value": ticket_body},
+        {"name": "DEVFORGE_JOB_ID",       "value": str(job_id)},
+        {"name": "CONTROL_PLANE_API",     "value": control_plane_url},
+    ]
+    if approval_token:
+        env_overrides.append(
+            {"name": "DEVFORGE_APPROVAL_TOKEN", "value": approval_token}
+        )
+
+    resp = _ECS_CLIENT.run_task(
+        cluster=cluster,
+        taskDefinition=task_def,
+        launchType="FARGATE",
+        count=1,
+        networkConfiguration={
+            "awsvpcConfiguration": {
+                "subnets": subnets,
+                "securityGroups": [sg],
+                "assignPublicIp": "ENABLED",
+            },
+        },
+        overrides={
+            "containerOverrides": [{
+                "name": "worker",
+                "command": ["python", "-m", "scripts.run_ticket", str(tenant_id)],
+                "environment": env_overrides,
+            }],
+        },
+    )
+    failures = resp.get("failures") or []
+    if failures:
+        raise HTTPException(
+            502,
+            f"ecs.run_task failed: {failures[0].get('reason', 'unknown')}",
+        )
+    tasks = resp.get("tasks") or []
+    task_arn = tasks[0]["taskArn"] if tasks else "<unknown>"
+    return f"ecs:{task_arn}"
+
+
 def _spawn_run_ticket(
     *, tenant_id: int, ticket_id: str, ticket_title: str, ticket_body: str,
     approval_token: str | None = None,
+    control_plane_url: str | None = None,
 ) -> tuple[int, str]:
-    """Validate tenant+repo, pre-create the queued jobs row, spawn
-    `scripts.run_ticket` as a detached subprocess. Returns (job_id, log_path).
+    """Validate tenant+repo, pre-create the queued jobs row, then dispatch:
+    - DEVFORGE_BACKEND=aws  → ecs.run_task() spawns a fresh Fargate task
+    - otherwise (local)     → subprocess.Popen scripts.run_ticket
 
-    Local-only: AWS deploy needs SQS dispatch instead of subprocess spawn.
+    Returns (job_id, dispatch_handle). The handle is a log path locally,
+    or "ecs:<task_arn>" on AWS — opaque to callers.
     """
     tenant_rows = _backend.db.execute(
         "SELECT id FROM tenants WHERE id = :t", {"t": tenant_id}
@@ -494,32 +591,41 @@ def _spawn_run_ticket(
     )
     job_id = new_rows[0]["id"]
 
-    import subprocess
-    env = dict(os.environ)
-    env["DEVFORGE_TICKET_ID"] = ticket_id
-    env["DEVFORGE_TICKET_TITLE"] = ticket_title
-    env["DEVFORGE_TICKET_BODY"] = ticket_body
-    env["DEVFORGE_JOB_ID"] = str(job_id)
-    if approval_token:
-        env["DEVFORGE_APPROVAL_TOKEN"] = approval_token
+    if os.environ.get("DEVFORGE_BACKEND") == "aws":
+        if not control_plane_url:
+            raise HTTPException(
+                500,
+                "AWS mode dispatch requires control_plane_url; FastAPI route handler "
+                "must pass `request.base_url` through to _spawn_run_ticket.",
+            )
+        handle = _dispatch_ecs_run_task(
+            job_id=job_id, tenant_id=tenant_id, ticket_id=ticket_id,
+            ticket_title=ticket_title, ticket_body=ticket_body,
+            approval_token=approval_token, control_plane_url=control_plane_url,
+        )
+    else:
+        handle = _dispatch_subprocess(
+            job_id=job_id, tenant_id=tenant_id, ticket_id=ticket_id,
+            ticket_title=ticket_title, ticket_body=ticket_body,
+            approval_token=approval_token,
+        )
+    return job_id, handle
 
-    log_dir = _REPO_ROOT / "data" / "job_logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"job_{job_id}.log"
-    log_fp = log_path.open("a")
-    subprocess.Popen(
-        ["uv", "run", "python", "-m", "scripts.run_ticket", str(tenant_id)],
-        cwd=str(_REPO_ROOT),
-        env=env,
-        stdout=log_fp,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    return job_id, str(log_path)
+
+def _control_plane_url(request: Request) -> str:
+    """Derive the public base URL of THIS control plane from the incoming
+    request. Used to forward CONTROL_PLANE_API into the worker container
+    via run_task overrides — avoids a TF Lambda↔API-Gateway cycle."""
+    base = str(request.base_url)
+    return base.rstrip("/")
 
 
 @app.post("/jobs", status_code=202)
-def submit_job(req: SubmitJobRequest, _auth: dict = Depends(dual_auth)):
+def submit_job(
+    req: SubmitJobRequest,
+    request: Request,
+    _auth: dict = Depends(dual_auth),
+):
     """Submit a ticket through the full crew. Pre-flights for secrets,
     pre-creates the jobs row so we can return its id, then spawns
     `scripts.run_ticket` via `_spawn_run_ticket` (mirroring the CLI
@@ -556,6 +662,7 @@ def submit_job(req: SubmitJobRequest, _auth: dict = Depends(dual_auth)):
         ticket_title=req.ticket_title,
         ticket_body=req.ticket_body,
         approval_token=req.approval_token,
+        control_plane_url=_control_plane_url(request),
     )
     return {"job_id": job_id, "log_path": log_path}
 
@@ -563,6 +670,7 @@ def submit_job(req: SubmitJobRequest, _auth: dict = Depends(dual_auth)):
 @app.post("/approvals/run", status_code=202)
 def mint_approval_and_run(
     req: ApproveAndRunRequest,
+    request: Request,
     _auth: dict = Depends(dual_auth),
 ):
     """Mint a ticket-bound approval token AND immediately spawn a fresh run.
@@ -582,6 +690,7 @@ def mint_approval_and_run(
         ticket_title=req.ticket_title,
         ticket_body=req.ticket_body,
         approval_token=token,
+        control_plane_url=_control_plane_url(request),
     )
     return {"token": token, "command": req.command, "job_id": job_id}
 

@@ -1,0 +1,60 @@
+# DevForge local stack — control plane + frontend with hot-reload.
+#
+# Bring up:    `make dev`         (or: `docker compose up`)
+# Tail logs:   `make logs`        (or: `docker compose logs -f`)
+# Bring down:  `make stop`        (or: `docker compose down`)
+# Reset state: `make clean`       (compose down -v && rm -rf data/)
+
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: devforge-control-plane
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env.local
+    environment:
+      DEVFORGE_BACKEND: local
+      # uvicorn re-emits this so the worker subprocess inherits the right
+      # callback URL when it httpx.gets back into the control plane.
+      CONTROL_PLANE_API: http://localhost:8001
+    volumes:
+      # Source — live-edit Python.
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./uv.lock:/app/uv.lock
+      # Persistent state visible from host.
+      - ./data:/app/data
+      - ./secrets:/app/secrets:ro
+      # Named volume for .venv so we don't blow away packages on rebuild and
+      # don't pollute the host filesystem.
+      - cp_venv:/app/.venv
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.local
+    container_name: devforge-frontend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/.env.local
+    volumes:
+      - ./frontend:/app
+      # Host's node_modules is masked by this named volume — keeps platform-
+      # specific binaries (esbuild, sharp) from conflicting.
+      - frontend_node_modules:/app/node_modules
+      # Anonymous volume for .next so Turbopack's build cache stays isolated
+      # in the container AND is wiped on every `compose down`. (A named volume
+      # accumulates stale dynamic-route module entries across restarts and
+      # surfaces as "PageNotFoundError: Cannot find module for page".)
+      - /app/.next
+    depends_on:
+      - control-plane
+
+volumes:
+  cp_venv:
+  frontend_node_modules:
