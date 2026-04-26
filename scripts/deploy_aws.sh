@@ -104,6 +104,9 @@ case "$cmd" in
     export TF_VAR_langfuse_public_key="${LANGFUSE_PUBLIC_KEY:-}"
     export TF_VAR_langfuse_secret_key="${LANGFUSE_SECRET_KEY:-}"
     export TF_VAR_langfuse_host="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
+    # OpenAI key for Agents-SDK default trace processor. Optional — empty
+    # string leaves OpenAI traces disabled, LangFuse unaffected.
+    export TF_VAR_openai_api_key="${OPENAI_API_KEY:-}"
     # AWSBackend deps — orchestrator writes events to Aurora + reads RAG
     # from S3 Vectors. Pulled from the existing 5_database state and
     # derived from the AWS account id.
@@ -125,7 +128,10 @@ case "$cmd" in
     # control plane Lambda can ecs.run_task() against the worker cluster.
     WORKER_DIR=terraform/6_worker
     export TF_VAR_ecs_cluster_name=$(cd "$WORKER_DIR" && terraform output -raw cluster_name)
-    export TF_VAR_ecs_task_definition_arn=$(cd "$WORKER_DIR" && terraform output -raw task_definition_arn)
+    # Use the family name (not the revisioned ARN) so ecs.run_task() always
+    # resolves to the latest ACTIVE revision. Pinning to a specific revision
+    # breaks the moment a worker re-apply auto-deregisters the old one.
+    export TF_VAR_ecs_task_definition_arn=$(cd "$WORKER_DIR" && terraform output -raw task_definition_family)
     export TF_VAR_ecs_security_group_id=$(cd "$WORKER_DIR" && terraform output -raw security_group_id)
     export TF_VAR_ecs_subnet_ids=$(cd "$WORKER_DIR" && terraform output -json subnet_ids)
     export TF_VAR_task_execution_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_execution_role_arn)
@@ -155,6 +161,16 @@ case "$cmd" in
     fi
     export TF_VAR_cors_origins="$CORS_BASE"
     tf_apply terraform/7_control_plane
+    # Force the Lambda to re-pull the just-pushed image. TF only sees
+    # `image_uri = ${repo}:${tag}` as a string, so when we push a new digest
+    # under the SAME tag it considers the function unchanged. update-function-code
+    # against the same uri picks up whatever digest the tag currently resolves to.
+    echo "== forcing Lambda image refresh =="
+    aws lambda update-function-code \
+      --function-name devforge-control-plane \
+      --image-uri "${ECR_BASE}/devforge-control-plane:${CP_TAG:-day7}" \
+      --query 'CodeSha256' --output text
+    aws lambda wait function-updated --function-name devforge-control-plane
     ;;
 
   frontend)

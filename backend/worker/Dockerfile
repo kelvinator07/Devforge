@@ -26,12 +26,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python package manager
 RUN pip install --no-cache-dir uv
 
-# Install only the AWS dep set (no sentence-transformers/chromadb in the image).
+# Install AWS deps + security gates (detect-secrets, semgrep) so QA can run.
+# `local` extra (chromadb, sentence-transformers) is correctly excluded — the
+# AWS worker uses S3 Vectors + SageMaker for RAG.
 COPY pyproject.toml ./
-RUN uv sync --no-install-project --extra aws
+RUN uv sync --no-install-project --extra aws --extra security
 
 # Copy the full backend/ tree so we can `python -m backend.worker.crew` etc.
 COPY backend/ ./backend/
+# scripts/run_ticket.py is the entrypoint the control plane Lambda dispatches
+# via ecs.run_task() containerOverrides. Without scripts/ in the image,
+# `python -m scripts.run_ticket` 1-shots with ModuleNotFoundError and the
+# Fargate task dies before emitting any orchestrator events.
+COPY scripts/ ./scripts/
 
 ENV DEVFORGE_BACKEND=aws \
     PYTHONUNBUFFERED=1

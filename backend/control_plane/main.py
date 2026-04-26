@@ -540,7 +540,10 @@ def _dispatch_ecs_run_task(
         overrides={
             "containerOverrides": [{
                 "name": "worker",
-                "command": ["python", "-m", "scripts.run_ticket", str(tenant_id)],
+                # `uv run` is required so the script picks up the venv at
+                # /app/.venv (where pyproject deps like dotenv live). Bare
+                # `python` resolves to the system interpreter without those.
+                "command": ["uv", "run", "python", "-m", "scripts.run_ticket", str(tenant_id)],
                 "environment": env_overrides,
             }],
         },

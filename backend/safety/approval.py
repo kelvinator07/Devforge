@@ -59,7 +59,10 @@ def mint(*, job_id: int | None = None, command: str) -> str:
             "job": job_id,  # NULL for ticket-bound tokens (post-migration 003)
             "ch": _cmd_hash(command),
             "th": _hash(raw),
-            "exp": (_now() + timedelta(seconds=_ttl_sec())).isoformat(),
+            # Pass the datetime object directly. AWS rds-data needs typeHint=TIMESTAMP
+            # for timestamptz columns; aws_backend._sql_param adds it when it sees a
+            # datetime. SQLite's adapter accepts datetimes natively too.
+            "exp": _now() + timedelta(seconds=_ttl_sec()),
         },
     )
     return raw
@@ -117,7 +120,7 @@ def verify_and_consume(*, job_id: int | None = None, command: str, token_raw: st
         return False
     get_backend().db.execute(
         "UPDATE approval_tokens SET consumed_at = :now WHERE id = :id",
-        {"now": _now().isoformat(), "id": row["id"]},
+        {"now": _now(), "id": row["id"]},
     )
     return True
 

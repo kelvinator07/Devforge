@@ -217,8 +217,11 @@ def run_gitleaks(paths: str = ".") -> dict:
     """
     import json as _json
 
-    # detect-secrets scan outputs JSON to stdout.
-    cmd = ["detect-secrets", "scan", "--all-files"]
+    # detect-secrets scan outputs JSON to stdout. Scan only git-tracked
+    # content (default behaviour — no `--all-files`) so we skip the
+    # worktree's `.git/objects/*` and any node_modules / .venv that
+    # would balloon the scan from ~1s to >60s on Fargate.
+    cmd = ["detect-secrets", "scan"]
     cmd.extend(shlex.split(paths))
     r = _run(cmd)
     findings: list[dict] = []

@@ -50,6 +50,13 @@ variable "langfuse_host" {
   default     = "https://cloud.langfuse.com"
 }
 
+variable "openai_api_key" {
+  description = "OpenAI API key for the Agents-SDK default trace processor (uploads to api.openai.com/traces). Empty string disables OpenAI tracing — LangFuse is unaffected."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 # AWSBackend dependencies — required for the orchestrator running in the
 # Fargate container. RAG store + Aurora job-event writes.
 variable "vector_bucket_name" {

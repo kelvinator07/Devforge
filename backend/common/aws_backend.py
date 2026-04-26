@@ -24,9 +24,7 @@ class AuroraDB(DB):
         self.client = boto3.client("rds-data", region_name=_aws_region())
 
     def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict]:
-        parameters = [
-            {"name": k, "value": _sql_value(v)} for k, v in (params or {}).items()
-        ]
+        parameters = [_sql_param(k, v) for k, v in (params or {}).items()]
         resp = self.client.execute_statement(
             resourceArn=self.cluster_arn,
             secretArn=self.secret_arn,
@@ -36,6 +34,29 @@ class AuroraDB(DB):
             includeResultMetadata=True,
         )
         return _rows(resp)
+
+
+def _sql_param(name: str, v: Any) -> dict:
+    """Build an rds-data parameter. datetime values get typeHint=TIMESTAMP
+    (Postgres timestamptz columns reject plain text without a cast)."""
+    from datetime import date, datetime
+    if isinstance(v, datetime):
+        # rds-data TIMESTAMP hint expects 'YYYY-MM-DD HH:MM:SS[.fff]' (no
+        # timezone suffix, no 'T' separator). UTC-normalize first.
+        if v.tzinfo is not None:
+            v = v.astimezone(tz=None).replace(tzinfo=None)
+        return {
+            "name": name,
+            "value": {"stringValue": v.strftime("%Y-%m-%d %H:%M:%S.%f")},
+            "typeHint": "TIMESTAMP",
+        }
+    if isinstance(v, date):
+        return {
+            "name": name,
+            "value": {"stringValue": v.isoformat()},
+            "typeHint": "DATE",
+        }
+    return {"name": name, "value": _sql_value(v)}
 
 
 def _sql_value(v: Any) -> dict:

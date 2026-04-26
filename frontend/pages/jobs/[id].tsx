@@ -30,7 +30,14 @@ function JobPageInner() {
   const router = useRouter();
   const jobId = Number(router.query.id);
   const { getToken } = useAuth();
-  const snapshot = useApi<JobSnapshot>(jobId ? `/jobs/${jobId}` : null);
+  // Poll the snapshot every 3s so the status badge tracks the row in real
+  // time (queued → pr_opened / failed). useApi suppresses the "loading…"
+  // flash on background polls, and the status changes are infrequent
+  // (one transition per job lifetime), so there's no flicker.
+  const snapshot = useApi<JobSnapshot>(
+    jobId ? `/jobs/${jobId}` : null,
+    { pollMs: 3000 },
+  );
 
   const [liveEvents, setLiveEvents] = useState<IncomingEvent[]>([]);
   const [closed, setClosed] = useState(false);
@@ -54,11 +61,17 @@ function JobPageInner() {
         seenIds.current.add(e.id);
         setLiveEvents((prev) => [...prev, e]);
       },
-      onClose() { setClosed(true); },
+      onClose() {
+        setClosed(true);
+        // Re-fetch the snapshot so the status badge + PR button reflect
+        // the final row (status="pr_opened" / pr_url=...). Without this
+        // the badge stays "queued" because useApi doesn't auto-poll.
+        snapshot.refresh();
+      },
       onError(err) { setError(String(err)); },
     });
     return stop;
-  }, [jobId, getToken]);
+  }, [jobId, getToken, snapshot.refresh]);
 
   // Auto-scroll on new events.
   useEffect(() => {

@@ -209,6 +209,9 @@ resource "aws_ecs_task_definition" "worker" {
       { name = "LANGFUSE_PUBLIC_KEY", value = var.langfuse_public_key },
       { name = "LANGFUSE_SECRET_KEY", value = var.langfuse_secret_key },
       { name = "LANGFUSE_HOST", value = var.langfuse_host },
+      # OpenAI's default Agents-SDK trace processor uploads to
+      # api.openai.com/traces using this key. Empty disables it cleanly.
+      { name = "OPENAI_API_KEY", value = var.openai_api_key },
     ]
 
     logConfiguration = {
