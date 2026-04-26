@@ -105,6 +105,15 @@ case "$cmd" in
 
   control-plane)
     build_push backend/control_plane/Dockerfile devforge-control-plane "${CP_TAG:-day7}"
+    # #7: pull worker outputs and pass them as TF_VAR_* env vars so the
+    # control plane Lambda can ecs.run_task() against the worker cluster.
+    WORKER_DIR=terraform/6_worker
+    export TF_VAR_ecs_cluster_name=$(cd "$WORKER_DIR" && terraform output -raw cluster_name)
+    export TF_VAR_ecs_task_definition_arn=$(cd "$WORKER_DIR" && terraform output -raw task_definition_arn)
+    export TF_VAR_ecs_security_group_id=$(cd "$WORKER_DIR" && terraform output -raw security_group_id)
+    export TF_VAR_ecs_subnet_ids=$(cd "$WORKER_DIR" && terraform output -json subnet_ids)
+    export TF_VAR_task_execution_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_execution_role_arn)
+    export TF_VAR_task_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_role_arn)
     tf_apply terraform/7_control_plane
     ;;
 

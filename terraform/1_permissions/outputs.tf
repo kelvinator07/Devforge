@@ -13,10 +13,16 @@ output "secret_read_policy_arn" {
   value       = aws_iam_policy.devforge_secret_read.arn
 }
 
+output "kms_cmk_arn" {
+  description = "ARN of the customer-managed KMS key encrypting the secrets (alias/devforge-secrets)."
+  value       = local.cmk_arn
+}
+
 output "setup_instructions" {
   value = <<-EOT
 
-    DevForge permissions module deployed (v1 — using AWS-managed KMS key).
+    DevForge permissions module deployed — secrets encrypted with the
+    customer-managed CMK at alias/devforge-secrets.
 
     Next steps:
       1. Put the OpenRouter API key:
@@ -29,8 +35,8 @@ output "setup_instructions" {
            --secret-id devforge/github-app-private-key \
            --secret-string "$(cat path/to/app.private-key.pem)"
 
-      3. Attach the secret-read policy to Fargate task role (6_worker) + Lambda role (7_control_plane).
-
-    v2 upgrade: grant kms:* to aiengineer group, then re-introduce customer-managed CMK.
+      3. Attach the secret-read policy (output: secret_read_policy_arn) to
+         the Fargate task role (6_worker) and Lambda role (7_control_plane).
+         The policy already grants kms:Decrypt on the CMK via kms:ViaService.
   EOT
 }

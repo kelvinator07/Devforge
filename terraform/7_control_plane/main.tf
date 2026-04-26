@@ -77,6 +77,37 @@ resource "aws_iam_role_policy" "lambda_aurora" {
   })
 }
 
+# #7 — POST /jobs dispatches a Fargate task per ticket via ecs.run_task().
+# Scoped to the worker cluster only; PassRole scoped to the two task roles.
+resource "aws_iam_role_policy" "lambda_ecs_run_task" {
+  name = "devforge-control-plane-ecs-run-task"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ecs:RunTask", "ecs:DescribeTasks"]
+        Resource = "*"
+        Condition = {
+          ArnEquals = {
+            "ecs:cluster" = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/${var.ecs_cluster_name}"
+          }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = [var.task_execution_role_arn, var.task_role_arn]
+        Condition = {
+          StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
+        }
+      },
+    ]
+  })
+}
+
 # ========================================
 # Lambda function (container image)
 # ========================================
@@ -95,6 +126,17 @@ resource "aws_lambda_function" "control_plane" {
       AURORA_SECRET_ARN  = var.aurora_secret_arn
       AURORA_DATABASE    = "devforge"
       GITHUB_APP_ID      = var.github_app_id
+
+      # #7 — AWS-mode ticket dispatch via ECS RunTask. The control plane
+      # derives CONTROL_PLANE_API at runtime from each incoming request
+      # (avoids a TF Lambda↔API-Gateway cycle), then forwards it to the
+      # worker via containerOverrides so the orchestrator's httpx callbacks
+      # land on this same API Gateway.
+      DEVFORGE_BACKEND    = "aws"
+      ECS_CLUSTER         = var.ecs_cluster_name
+      ECS_TASK_DEFINITION = var.ecs_task_definition_arn
+      ECS_SUBNETS         = join(",", var.ecs_subnet_ids)
+      ECS_SECURITY_GROUP  = var.ecs_security_group_id
     }
   }
 
