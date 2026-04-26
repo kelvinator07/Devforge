@@ -161,6 +161,15 @@ resource "aws_ecs_task_definition" "worker" {
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "DEVFORGE_WORKER_MODE", value = "smoke" },
+      { name = "DEVFORGE_BACKEND", value = "aws" },
+      # Required: control plane URL for orchestrator httpx callbacks.
+      # The control plane also forwards this via containerOverrides at
+      # run-task time — set here so standalone `aws ecs run-task` works too.
+      { name = "CONTROL_PLANE_API", value = var.control_plane_api },
+      # Optional observability — empty strings cleanly disable LangFuse.
+      { name = "LANGFUSE_PUBLIC_KEY", value = var.langfuse_public_key },
+      { name = "LANGFUSE_SECRET_KEY", value = var.langfuse_secret_key },
+      { name = "LANGFUSE_HOST", value = var.langfuse_host },
     ]
 
     logConfiguration = {

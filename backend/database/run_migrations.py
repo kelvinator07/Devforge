@@ -122,6 +122,7 @@ def apply_local(sql_files: list[Path]) -> None:
 
 def apply_aws(sql_files: list[Path]) -> None:
     import boto3
+    from botocore.exceptions import ClientError
 
     cluster_arn = os.environ["AURORA_CLUSTER_ARN"]
     secret_arn = os.environ["AURORA_SECRET_ARN"]
@@ -133,10 +134,23 @@ def apply_aws(sql_files: list[Path]) -> None:
         print(f"== applying {f.name} (postgres mode) ==")
         for stmt in split_sql(f.read_text()):
             print(f"   > {stmt.strip().splitlines()[0][:80]}")
-            client.execute_statement(
-                resourceArn=cluster_arn, secretArn=secret_arn,
-                database=database, sql=stmt,
-            )
+            try:
+                client.execute_statement(
+                    resourceArn=cluster_arn, secretArn=secret_arn,
+                    database=database, sql=stmt,
+                )
+            except ClientError as exc:
+                # Postgres returns "column ... already exists" on re-run of
+                # ALTER TABLE ADD COLUMN. Mirror the SQLite catch path so
+                # migrations stay idempotent across both backends.
+                msg = str(exc).lower()
+                if "already exists" in msg and "add column" in stmt.lower():
+                    col_match = re.search(
+                        r"ADD\s+COLUMN\s+(\w+)", stmt, re.IGNORECASE)
+                    col = col_match.group(1) if col_match else "?"
+                    print(f"   (postgres) column {col}: already exists, skipping")
+                    continue
+                raise
 
 
 def main() -> None:

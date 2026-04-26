@@ -32,6 +32,12 @@ variable "github_app_id" {
   type        = string
 }
 
+variable "clerk_jwks_url" {
+  description = "Clerk JWKS URL for JWT validation. Empty string = Clerk auth disabled (admin token still works)."
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # Worker / ECS RunTask wiring (#7 — POST /jobs dispatches via ecs.run_task in
 # AWS mode). Pulled from terraform/6_worker outputs by scripts/deploy_aws.sh.

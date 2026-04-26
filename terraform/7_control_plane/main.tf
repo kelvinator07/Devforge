@@ -137,6 +137,10 @@ resource "aws_lambda_function" "control_plane" {
       ECS_TASK_DEFINITION = var.ecs_task_definition_arn
       ECS_SUBNETS         = join(",", var.ecs_subnet_ids)
       ECS_SECURITY_GROUP  = var.ecs_security_group_id
+
+      # Clerk JWT validation. Empty → admin-token-only auth (CLI works,
+      # browser sign-in 503s on protected endpoints).
+      CLERK_JWKS_URL = var.clerk_jwks_url
     }
   }
 

@@ -100,6 +100,17 @@ case "$cmd" in
   worker)
     # Dockerfile lives under backend/worker/ but build context is the repo root.
     build_push backend/worker/Dockerfile devforge-worker "${WORKER_TAG:-day7}"
+    # Forward observability + control-plane URL from the host env. Empty
+    # values cleanly disable LangFuse / leave CONTROL_PLANE_API blank (the
+    # control plane overrides it via containerOverrides at run-task time).
+    export TF_VAR_langfuse_public_key="${LANGFUSE_PUBLIC_KEY:-}"
+    export TF_VAR_langfuse_secret_key="${LANGFUSE_SECRET_KEY:-}"
+    export TF_VAR_langfuse_host="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
+    # If 7_control_plane has been deployed, pre-populate the worker task def
+    # with its URL too (helps standalone `aws ecs run-task` smoke tests).
+    if [ -f terraform/7_control_plane/terraform.tfstate ]; then
+      export TF_VAR_control_plane_api=$(cd terraform/7_control_plane && terraform output -raw api_endpoint 2>/dev/null || echo "")
+    fi
     tf_apply terraform/6_worker
     ;;
 
@@ -114,6 +125,9 @@ case "$cmd" in
     export TF_VAR_ecs_subnet_ids=$(cd "$WORKER_DIR" && terraform output -json subnet_ids)
     export TF_VAR_task_execution_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_execution_role_arn)
     export TF_VAR_task_role_arn=$(cd "$WORKER_DIR" && terraform output -raw task_role_arn)
+    # Clerk JWKS URL for browser-side JWT validation (optional — empty
+    # disables Clerk auth path; admin token still works).
+    export TF_VAR_clerk_jwks_url="${CLERK_JWKS_URL:-}"
     tf_apply terraform/7_control_plane
     ;;
 
