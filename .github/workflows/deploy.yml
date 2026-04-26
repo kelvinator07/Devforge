@@ -1,0 +1,98 @@
+name: Deploy to AWS
+
+# Placeholder workflow — wires up the shape of the deploy job without
+# actually running `terraform apply` or pushing images. Triggered manually
+# (workflow_dispatch) until the real deploy is enabled.
+#
+# To activate:
+#   1. Configure GitHub OIDC trust for AWS (or add static AWS_ACCESS_KEY_ID /
+#      AWS_SECRET_ACCESS_KEY repo secrets — OIDC is preferred).
+#   2. Add the repo secrets listed under `env:` below.
+#   3. Uncomment the "Real deploy" steps and remove the placeholder echo.
+#   4. Optionally add a `push: branches: [main]` trigger to auto-deploy on
+#      merge — keep workflow_dispatch as well for manual rollouts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which deploy_aws.sh subcommand to run (all | frontend | worker | control-plane | database | sagemaker | permissions)"
+        required: true
+        default: frontend
+        type: choice
+        options:
+          - all
+          - permissions
+          - sagemaker
+          - database
+          - worker
+          - control-plane
+          - frontend
+
+concurrency:
+  # One deploy at a time per target — overlapping `terraform apply` calls
+  # against the same module corrupt local state.
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required for AWS OIDC
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: us-east-1
+      # Secrets the real deploy needs — wire these up in repo settings before
+      # un-stubbing the steps below.
+      DEVFORGE_ADMIN_TOKEN: ${{ secrets.DEVFORGE_ADMIN_TOKEN }}
+      OPENROUTER_API_KEY:    ${{ secrets.OPENROUTER_API_KEY }}
+      CLERK_JWKS_URL:        ${{ secrets.CLERK_JWKS_URL }}
+      LANGFUSE_PUBLIC_KEY:   ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY:   ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_HOST:         ${{ secrets.LANGFUSE_HOST }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Placeholder — would deploy ${{ inputs.target }}
+        run: |
+          echo "::notice::Placeholder deploy. Wire up AWS creds + uncomment real steps to enable."
+          echo "Target: ${{ inputs.target }}"
+          echo "Region: $AWS_REGION"
+          echo "Dry-run: ./scripts/deploy_aws.sh ${{ inputs.target }}"
+
+      # ----------------------------------------------------------------------
+      # Real deploy steps — uncomment when ready to ship from CI.
+      # ----------------------------------------------------------------------
+      #
+      # - name: Configure AWS credentials (OIDC)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+      #     aws-region: ${{ env.AWS_REGION }}
+      #
+      # - name: Install uv
+      #   uses: astral-sh/setup-uv@v3
+      #
+      # - name: Set up Python
+      #   run: uv python install 3.12
+      #
+      # - name: Set up Node (for frontend builds)
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 20
+      #
+      # - name: Set up Terraform
+      #   uses: hashicorp/setup-terraform@v3
+      #   with:
+      #     terraform_version: 1.9.0
+      #
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
+      #
+      # - name: Run deploy
+      #   run: ./scripts/deploy_aws.sh ${{ inputs.target }}
