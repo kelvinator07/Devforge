@@ -62,7 +62,7 @@ function TopNav() {
         </div>
         <div className="flex items-center gap-3">
           <a
-            href="https://github.com/anthropics/devforge"
+            href="https://github.com/kelvinator07/Devforge"
             target="_blank"
             rel="noreferrer"
             className="focus-ring rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800/60 hover:text-zinc-200 no-underline"
