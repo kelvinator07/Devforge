@@ -1,12 +1,16 @@
-import { SignedIn, SignedOut, RedirectToSignIn, UserButton, useAuth } from "@clerk/nextjs";
+import { SignedIn, SignedOut, RedirectToSignIn, useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, ExternalLink, GitPullRequest, Activity } from "lucide-react";
 
 import { useApi, langfuseTraceUrl, type JobEvent } from "../../lib/api";
 import { tailJob, type IncomingEvent } from "../../lib/sse";
 import { EventCard, EventCardSkeleton } from "../../components/EventCard";
 import { StatusBadge } from "../../components/StatusBadge";
+import { Layout } from "../../components/Layout";
+import { Card } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
 
 const TERMINAL_STATUSES = new Set([
   "pr_opened",
@@ -38,10 +42,6 @@ function JobPageInner() {
   const router = useRouter();
   const jobId = Number(router.query.id);
   const { getToken } = useAuth();
-  // Poll the snapshot every 3s so the status badge tracks the row in real
-  // time (queued → pr_opened / failed). useApi suppresses the "loading…"
-  // flash on background polls, and the status changes are infrequent
-  // (one transition per job lifetime), so there's no flicker.
   const snapshot = useApi<JobSnapshot>(
     jobId ? `/jobs/${jobId}` : null,
     { pollMs: 3000 },
@@ -53,7 +53,6 @@ function JobPageInner() {
   const seenIds = useRef<Set<number>>(new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Open SSE once we know the job id.
   useEffect(() => {
     if (!jobId || Number.isNaN(jobId)) return;
     setLiveEvents([]);
@@ -71,24 +70,27 @@ function JobPageInner() {
       },
       onClose() {
         setClosed(true);
-        // Re-fetch the snapshot so the status badge + PR button reflect
-        // the final row (status="pr_opened" / pr_url=...). Without this
-        // the badge stays "queued" because useApi doesn't auto-poll.
         snapshot.refresh();
       },
-      onError(err) { setError(String(err)); },
+      onError(err) {
+        setError(String(err));
+      },
     });
     return stop;
   }, [jobId, getToken, snapshot.refresh]);
 
-  // Auto-scroll on new events.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [liveEvents.length]);
 
-  if (!jobId) return <div className="p-8 text-zinc-500">missing job id</div>;
+  if (!jobId) {
+    return (
+      <Layout width="default">
+        <div className="text-zinc-500">Missing job id.</div>
+      </Layout>
+    );
+  }
 
-  // Merge snapshot events + live, dedup by id.
   const merged: IncomingEvent[] = [];
   const seen = new Set<number>();
   for (const e of snapshot.data?.events ?? []) {
@@ -105,91 +107,124 @@ function JobPageInner() {
   }
   merged.sort((a, b) => a.id - b.id);
 
-  // Pull the LangFuse trace id off the `trace_started` event (emitted by the
-  // orchestrator immediately after `cost_tracking_started`). Hidden when the
-  // env var NEXT_PUBLIC_LANGFUSE_PROJECT_ID is unset.
   const traceStarted = merged.find((e) => e.type === "trace_started");
   const traceId = traceStarted?.data?.trace_id as string | undefined;
   const traceUrl = traceId ? langfuseTraceUrl(traceId) : null;
 
+  const jobStatus = snapshot.data?.job?.status;
+  const isTerminal = closed || (jobStatus !== undefined && TERMINAL_STATUSES.has(jobStatus));
+
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
-      <header className="mb-6 flex items-center justify-between">
-        <div>
-          <Link href="/dashboard" className="text-sm text-zinc-500 hover:text-zinc-300">← dashboard</Link>
-          <h1 className="mt-1 text-2xl font-semibold">job #{jobId}</h1>
-        </div>
-        <UserButton />
-      </header>
+    <Layout width="default">
+      <div className="mb-6">
+        <Link
+          href="/dashboard"
+          className="focus-ring inline-flex items-center gap-1 rounded-md text-xs text-zinc-500 no-underline hover:text-zinc-300"
+        >
+          <ArrowLeft className="h-3 w-3" />
+          Dashboard
+        </Link>
+        <h1 className="mt-2 text-[var(--text-h1)] font-semibold tracking-tight text-zinc-100">
+          Job <span className="font-mono text-zinc-400">#{jobId}</span>
+        </h1>
+      </div>
 
       {snapshot.data?.job && (
-        <section className="mb-6 rounded border border-zinc-800 bg-[var(--card)] p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-xs uppercase tracking-wide text-zinc-500">ticket</div>
-              <div className="mt-1 truncate text-base">{snapshot.data.job.ticket_title}</div>
+        <Card variant="elevated" className="mb-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Ticket</div>
+              <div className="mt-1 truncate text-base font-medium text-zinc-100">
+                {snapshot.data.job.ticket_title}
+              </div>
+              <div className="mt-2 text-xs text-zinc-500">
+                {formatDate(snapshot.data.job.created_at)}
+              </div>
             </div>
-            <div className="shrink-0 flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               <StatusBadge status={snapshot.data.job.status} />
               {traceUrl && (
-                <a href={traceUrl} target="_blank" rel="noreferrer"
-                   className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                   title="Open this job's full agent trace on LangFuse">
-                  view trace ↗
-                </a>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  leftIcon={<ExternalLink className="h-3.5 w-3.5" />}
+                  onClick={() => window.open(traceUrl, "_blank", "noopener,noreferrer")}
+                  title="Open this job's full agent trace on LangFuse"
+                >
+                  Trace
+                </Button>
               )}
               {snapshot.data.job.pr_url && (
-                <a href={snapshot.data.job.pr_url} target="_blank" rel="noreferrer"
-                   className="rounded bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-500">
-                  view PR ↗
-                </a>
+                <Button
+                  size="sm"
+                  leftIcon={<GitPullRequest className="h-3.5 w-3.5" />}
+                  onClick={() => window.open(snapshot.data!.job.pr_url!, "_blank", "noopener,noreferrer")}
+                >
+                  View PR
+                </Button>
               )}
             </div>
           </div>
-          <div className="mt-2 text-xs text-zinc-500">{snapshot.data.job.created_at}</div>
-        </section>
+        </Card>
       )}
 
       <section>
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-medium">Events</h2>
-          <span className="text-xs text-zinc-500">
-            {merged.length} events · {closed ? "stream closed" : "live"}
+          <h2 className="text-[var(--text-h2)] font-semibold text-zinc-100">Events</h2>
+          <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
+            <span className="font-mono tabular-nums">{merged.length}</span>
+            <span>·</span>
+            {closed ? (
+              <span>stream closed</span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-emerald-400">
+                <Activity className="h-3 w-3 animate-pulse" />
+                live
+              </span>
+            )}
           </span>
         </div>
+
         {error && (
-          <div className="mb-3 rounded border border-rose-700/40 bg-rose-500/5 p-2 text-xs text-rose-300">
-            SSE error: {error}
-          </div>
+          <Card variant="danger" padding="sm" className="mb-3">
+            <div className="text-xs text-rose-200">SSE error: {error}</div>
+          </Card>
         )}
-        {(() => {
-          const jobStatus = snapshot.data?.job?.status;
-          const isTerminal =
-            closed || (jobStatus !== undefined && TERMINAL_STATUSES.has(jobStatus));
-          return (
-            <div className="space-y-2">
-              {merged.length === 0 && !error && !isTerminal && (
-                <div className="text-xs text-zinc-500">
-                  Spawning a Fargate task — first events typically arrive within
-                  ~30 seconds (cold-start). The page polls every 1.5 s.
-                </div>
-              )}
-              {merged.map((e) => (
-                <EventCard key={e.id} id={e.id} type={e.type} data={e.data} />
-              ))}
-              {!isTerminal && !error && (
-                <>
-                  <EventCardSkeleton />
-                  <EventCardSkeleton accent="border-l-zinc-800" />
-                  <EventCardSkeleton accent="border-l-zinc-800" />
-                  <EventCardSkeleton accent="border-l-zinc-800" />
-                </>
-              )}
-              <div ref={bottomRef} />
+
+        <div className="space-y-2">
+          {merged.length === 0 && !error && !isTerminal && (
+            <div className="rounded-md border border-dashed border-[var(--border)] px-4 py-3 text-xs text-zinc-500">
+              Spawning a Fargate task — first events typically arrive within ~30s (cold start).
+              The page polls every 1.5s.
             </div>
-          );
-        })()}
+          )}
+          {merged.map((e) => (
+            <EventCard key={e.id} id={e.id} type={e.type} data={e.data} />
+          ))}
+          {!isTerminal && !error && (
+            <>
+              <EventCardSkeleton />
+              <EventCardSkeleton accent="border-l-zinc-800" />
+              <EventCardSkeleton accent="border-l-zinc-800" />
+              <EventCardSkeleton accent="border-l-zinc-800" />
+            </>
+          )}
+          <div ref={bottomRef} />
+        </div>
       </section>
-    </div>
+    </Layout>
   );
+}
+
+function formatDate(s: string): string {
+  try {
+    return new Date(s).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return s;
+  }
 }

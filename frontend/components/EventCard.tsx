@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 type Props = {
   id: number;
@@ -12,15 +13,15 @@ type Props = {
 export function EventCardSkeleton({ accent = "border-l-zinc-700" }: { accent?: string }) {
   return (
     <div
-      className={`rounded border border-zinc-800 border-l-4 ${accent} bg-[var(--card)] p-3 animate-pulse`}
+      className={`rounded-md border border-[var(--border)] border-l-4 ${accent} bg-[var(--card)]/60 p-3`}
       aria-hidden="true"
     >
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0 flex-1 space-y-2">
-          <div className="h-3 w-32 rounded bg-zinc-800" />
-          <div className="h-4 w-3/4 rounded bg-zinc-800/60" />
+          <div className="h-2.5 w-32 rounded animate-shimmer" />
+          <div className="h-3 w-3/4 rounded animate-shimmer" />
         </div>
-        <div className="h-3 w-12 rounded bg-zinc-800/60 shrink-0" />
+        <div className="h-2.5 w-12 rounded animate-shimmer shrink-0" />
       </div>
     </div>
   );
@@ -54,17 +55,25 @@ export function EventCard({ id, type, data, ts }: Props) {
   const [open, setOpen] = useState(false);
   const accent = ACCENT[type] || "border-l-zinc-600";
   const summary = friendlySummary(type, data);
-  // For step_finished failures, surface the agent's summary + test_result
-  // inline so the user doesn't have to expand `details` to see the reason.
   const isFailedStep = type === "step_finished" && data.success === false;
   const failureSummary = isFailedStep ? (data.summary as string | undefined) : undefined;
   const failureTestResult = isFailedStep ? (data.test_result as string | undefined) : undefined;
   return (
-    <div className={`rounded border border-zinc-800 border-l-4 ${accent} bg-[var(--card)] p-3`}>
+    <div
+      className={[
+        "rounded-md border border-[var(--border)] border-l-4 bg-[var(--card)] p-3",
+        "transition-colors duration-[var(--dur-fast)] hover:bg-[var(--card-hover)]",
+        accent,
+      ].join(" ")}
+    >
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">#{id} · {type}</div>
-          <div className="mt-0.5 text-sm text-zinc-200">{summary}</div>
+          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-zinc-500">
+            <span className="font-mono text-zinc-600">#{id}</span>
+            <span>·</span>
+            <span className="text-zinc-400">{type}</span>
+          </div>
+          {summary && <div className="mt-0.5 text-sm text-zinc-200">{summary}</div>}
           {failureSummary && (
             <div className="mt-1 text-xs text-rose-300">{failureSummary}</div>
           )}
@@ -75,15 +84,17 @@ export function EventCard({ id, type, data, ts }: Props) {
           )}
         </div>
         <button
-          className="shrink-0 text-xs text-zinc-400 hover:text-zinc-200"
+          className="focus-ring shrink-0 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-800/60 hover:text-zinc-300"
           onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
         >
-          {open ? "hide" : "details"}
+          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          <span>details</span>
         </button>
       </div>
       {ts && <div className="mt-1 text-[10px] text-zinc-500">{ts}</div>}
       {open && (
-        <pre className="mt-2 max-h-64 overflow-auto text-xs text-zinc-300">
+        <pre className="mt-2 max-h-64 overflow-auto rounded bg-zinc-950/60 p-2 text-xs text-zinc-300">
 {JSON.stringify(data, null, 2)}
         </pre>
       )}
