@@ -1,20 +1,21 @@
 # DevForge frontend dev image — Next.js 16 dev server with HMR.
+#
 # Source bind-mounted at runtime; node_modules lives on a named volume.
+# We deliberately don't `npm install` at build time. Pre-installing baked
+# ~850 MB into the image, which then had to be *copied* into the empty
+# `frontend_node_modules` named volume on first attach (slow on Apple
+# Silicon's grpcfuse). Instead, the boot-time CMD's `npm install`
+# populates the empty volume directly, and the `npm_cache` named volume
+# keeps tarball downloads around so subsequent boots are fast.
 FROM node:20-alpine
 
 WORKDIR /app
-
-# Pre-install deps from package*.json into a layer that gets overlaid by the
-# bind mount. The named volume node_modules captures whatever this layer
-# leaves behind on first attach.
-COPY package.json package-lock.json* ./
-RUN npm install
 
 ENV NODE_ENV=development \
     HOSTNAME=0.0.0.0
 
 EXPOSE 3000
 
-# Re-install on boot so newly-added deps come in without a rebuild. Then dev
-# server with HMR.
+# Boot-time: install deps into the node_modules volume (empty on first
+# attach, persisted thereafter), then start the dev server with HMR.
 CMD ["sh", "-c", "npm install && exec npm run dev"]

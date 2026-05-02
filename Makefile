@@ -23,14 +23,13 @@ help: ## List the targets in this Makefile.
 
 # ---- One-shot setup -----------------------------------------------------
 
-setup: ## Build images, install Python + Node deps, run DB migrations.
+setup: ## Build images, install Node deps, run DB migrations. (Python deps install on first `make dev`.)
 	$(DC) build
-	$(DC) run --rm control-plane uv sync
 	$(DC) run --rm frontend npm install
 	$(MAKE) migrate
 	@echo
 	@echo "Setup complete. Next:"
-	@echo "  make dev        # bring up the stack"
+	@echo "  make dev        # bring up the stack (first boot installs Python deps; ~3-5 min)"
 	@echo "  make seed       # populate + index the demo repo"
 .PHONY: setup
 

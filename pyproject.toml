@@ -18,7 +18,7 @@ dependencies = [
     "uvicorn>=0.30.0",
     "mangum>=0.19.0",
     "pyjwt[crypto]>=2.9.0",
-    "cryptography>=43.0.0",
+    "cryptography>=43.0.0,<47.0.0",
     "fastapi-clerk-auth>=0.0.7",
     # MCP (Day 6)
     "mcp>=1.0.0",
@@ -30,9 +30,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # For local development — embeds + vectors run on your laptop.
+# torch is pinned explicitly here (not just transitively via sentence-transformers)
+# so that [tool.uv.sources] below routes it through PyTorch's CPU-only index —
+# avoids dragging in 1.5 GB of NVIDIA CUDA wheels we never use.
 local = [
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
+    "torch>=2.4.0",
 ]
 
 # Security gates (Day 8). Worker installs this; control plane doesn't.
@@ -63,3 +67,18 @@ obs = []
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "--tb=short -q"
+
+# ---------------------------------------------------------------------------
+# uv config — route torch through PyTorch's CPU-only wheel index so `uv sync`
+# doesn't drag in 1.5 GB of NVIDIA CUDA wheels (cudnn, cublas, cuda-runtime,
+# etc.) that sentence-transformers transitively requires. The local Docker
+# image was running out of disk during build; CI runs slower with the GPU
+# stack. We never use GPU — all-MiniLM-L6-v2 runs identically on CPU.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]

@@ -29,9 +29,13 @@ services:
       # Persistent state visible from host.
       - ./data:/app/data
       - ./secrets:/app/secrets:ro
-      # Named volume for .venv so we don't blow away packages on rebuild and
-      # don't pollute the host filesystem.
+      # Named volume for .venv — populated by boot-time `uv sync`; survives
+      # container restarts so we don't redo the install on every `make dev`.
       - cp_venv:/app/.venv
+      # uv's package cache — persists wheel downloads across container
+      # rebuilds. Without this, every fresh `cp_venv` would re-download
+      # ~1.5 GB from PyPI. With this, subsequent installs are wheel-fast.
+      - uv_cache:/root/.cache/uv
 
   frontend:
     build:
@@ -47,6 +51,9 @@ services:
       # Host's node_modules is masked by this named volume — keeps platform-
       # specific binaries (esbuild, sharp) from conflicting.
       - frontend_node_modules:/app/node_modules
+      # npm's tarball cache — persists across container rebuilds so first
+      # `npm install` after a `frontend_node_modules` reset is wheel-fast.
+      - npm_cache:/root/.npm
       # Anonymous volume for .next so Turbopack's build cache stays isolated
       # in the container AND is wiped on every `compose down`. (A named volume
       # accumulates stale dynamic-route module entries across restarts and
@@ -57,4 +64,6 @@ services:
 
 volumes:
   cp_venv:
+  uv_cache:
   frontend_node_modules:
+  npm_cache:

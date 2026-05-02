@@ -21,22 +21,22 @@ RUN sh /uv-install.sh && mv /root/.local/bin/uv /usr/local/bin/uv && rm /uv-inst
 
 WORKDIR /app
 
-# Pre-warm the venv during build so first-up isn't a 60-second sync. The
-# bind-mount-overlaid .venv volume gets seeded from this on first attach.
-# --all-extras pulls local (chromadb, sentence-transformers, detect-secrets,
-# semgrep), aws (boto3 for ECS dispatch), and obs (langfuse) — all needed
-# for the worker subprocess that runs in this same container.
-COPY pyproject.toml uv.lock* ./
-RUN uv sync --frozen --all-extras 2>/dev/null || uv sync --all-extras
+# pyproject.toml + uv.lock are bind-mounted at runtime by docker-compose.yml,
+# so we don't COPY them here — and we deliberately don't pre-warm the venv
+# at build time. Pre-warming bakes a 1.5 GB layer that then has to be
+# *copied* into the empty `cp_venv` named volume on first attach (slow on
+# Apple Silicon's grpcfuse). Instead, the boot-time `uv sync` populates the
+# empty volume directly, and the `uv_cache` named volume keeps PyPI wheels
+# around so subsequent boots are fast.
 
 ENV PYTHONUNBUFFERED=1 \
-    DEVFORGE_BACKEND=local
+    DEVFORGE_BACKEND=local \
+    UV_CACHE_DIR=/root/.cache/uv
 
 EXPOSE 8001
 
-# Re-sync on each boot so live edits to pyproject.toml are picked up. Then
-# uvicorn watches Python source for hot-reload (data/ excluded — see
-# scripts/local_dev.sh comment for why).
+# Boot-time: sync deps into the .venv volume (empty on first attach, then
+# populated and persisted), then exec uvicorn with hot-reload.
 CMD ["sh", "-c", "uv sync --frozen --all-extras 2>/dev/null || uv sync --all-extras && \
     exec uv run uvicorn backend.control_plane.main:app \
         --reload --host 0.0.0.0 --port 8001 \
