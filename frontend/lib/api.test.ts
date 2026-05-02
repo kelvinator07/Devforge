@@ -8,7 +8,13 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { langfuseTraceUrl, mintApprovalAndRun, submitTicket } from "./api";
+import {
+  connectInstallation,
+  listMyTenants,
+  langfuseTraceUrl,
+  mintApprovalAndRun,
+  submitTicket,
+} from "./api";
 
 describe("langfuseTraceUrl", () => {
   it("returns null when project id is missing", () => {
@@ -134,6 +140,114 @@ describe("submitTicket", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.ticket_id).toBe("DEMO-7");
     expect(body.approval_token).toBe("raw-token");
+  });
+
+  it("forwards repo_id when provided (multi-repo per tenant)", async () => {
+    (global.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ job_id: 5 }),
+    });
+
+    await submitTicket(vi.fn().mockResolvedValue("tok"), {
+      tenant_id: 1,
+      repo_id: 7,
+      ticket_title: "t",
+      ticket_body: "b",
+    });
+
+    const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.tenant_id).toBe(1);
+    expect(body.repo_id).toBe(7);
+  });
+});
+
+describe("listMyTenants", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+
+  it("GETs /tenants/mine and returns the tenants array", async () => {
+    (global.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        tenants: [
+          { id: 1, name: "acme", github_owner: "acme", github_installation_id: 100, created_at: "", repos: [] },
+        ],
+      }),
+    });
+
+    const res = await listMyTenants(vi.fn().mockResolvedValue("jwt"));
+    expect(res.tenants).toHaveLength(1);
+    expect(res.tenants[0].github_owner).toBe("acme");
+
+    const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/tenants\/mine$/);
+    expect(init.headers.Authorization).toBe("Bearer jwt");
+  });
+
+  it("throws on non-200", async () => {
+    (global.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => "unauthorized",
+    });
+
+    await expect(
+      listMyTenants(vi.fn().mockResolvedValue("jwt")),
+    ).rejects.toThrow(/401/);
+  });
+});
+
+describe("connectInstallation", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+
+  it("POSTs to /tenants/connect with installation_id + state", async () => {
+    (global.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: 7,
+        name: "acme",
+        github_owner: "acme",
+        github_installation_id: 100,
+        created_at: "",
+        repos: [{ id: 11, full_name: "acme/api", default_branch: "main" }],
+      }),
+    });
+
+    const res = await connectInstallation(vi.fn().mockResolvedValue("jwt"), {
+      installation_id: 100,
+      state: "abc12345",
+    });
+    expect(res.id).toBe(7);
+    expect(res.repos).toHaveLength(1);
+
+    const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/tenants\/connect$/);
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body);
+    expect(body.installation_id).toBe(100);
+    expect(body.state).toBe("abc12345");
+  });
+
+  it("throws on non-200", async () => {
+    (global.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({ detail: "GitHub rejected installation_id=100: 404" }),
+      text: async () => "",
+    });
+
+    await expect(
+      connectInstallation(vi.fn().mockResolvedValue("jwt"), {
+        installation_id: 100,
+        state: "abc12345",
+      }),
+    ).rejects.toThrow(/502/);
   });
 });
 

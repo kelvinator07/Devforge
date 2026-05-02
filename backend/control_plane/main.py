@@ -37,7 +37,11 @@ load_dotenv(_REPO_ROOT / ".env.local", override=False)
 load_dotenv(_REPO_ROOT / ".env", override=False)
 
 from backend.common import get_backend  # noqa: E402
-from backend.control_plane.github_app import installation_token_for  # noqa: E402
+from backend.control_plane.github_app import (  # noqa: E402
+    installation_token_for,
+    list_installation_repos,
+)
+import httpx  # noqa: E402  (used for HTTPStatusError in /tenants/connect)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -203,15 +207,27 @@ class OnboardRequest(BaseModel):
 
 class SubmitJobRequest(BaseModel):
     tenant_id: int
+    # Optional: with multi-repo per tenant, frontend should pass the active
+    # repo_id. Falls back to the tenant's first-by-id repo for backward compat
+    # with the legacy CLI path.
+    repo_id: int | None = None
     ticket_title: str = Field(..., min_length=1, max_length=512)
     ticket_body: str = Field(..., min_length=1, max_length=8192)
     ticket_id: str = "DEMO-1"
     approval_token: str | None = None
 
 
+class ConnectInstallationRequest(BaseModel):
+    """`state` is a CSRF token the frontend stashed before redirect (defense-
+    in-depth; the Clerk JWT is the real auth)."""
+    installation_id: int
+    state: str = Field(..., min_length=8, max_length=128)
+
+
 class ApproveAndRunRequest(BaseModel):
     command: str = Field(..., min_length=1, max_length=512)
     tenant_id: int
+    repo_id: int | None = None
     ticket_title: str = Field(..., min_length=1, max_length=512)
     ticket_body: str = Field(..., min_length=1, max_length=8192)
     ticket_id: str = "DEMO-1"
@@ -235,18 +251,8 @@ def onboard_tenant(req: OnboardRequest, _auth: dict = Depends(dual_auth)):
     if existing:
         tenant_id = existing[0]["id"]
         logger.info("tenant exists for installation_id=%s -> %s", req.installation_id, tenant_id)
-        # Idempotently update Clerk identity if the caller provided one and
-        # the row didn't have one yet — useful for backfill via re-onboard.
         if req.clerk_user_id or req.clerk_org_id:
-            _backend.db.execute(
-                """
-                UPDATE tenants
-                SET clerk_user_id = COALESCE(clerk_user_id, :u),
-                    clerk_org_id  = COALESCE(clerk_org_id,  :o)
-                WHERE id = :t
-                """,
-                {"u": req.clerk_user_id, "o": req.clerk_org_id, "t": tenant_id},
-            )
+            _upsert_clerk_binding(tenant_id, req.clerk_user_id, req.clerk_org_id)
     else:
         rows = _backend.db.execute(
             """
@@ -262,16 +268,7 @@ def onboard_tenant(req: OnboardRequest, _auth: dict = Depends(dual_auth)):
         tenant_id = rows[0]["id"]
         logger.info("created tenant %s for %s", tenant_id, req.tenant_name)
 
-    existing_repo = _backend.db.execute(
-        "SELECT id FROM repos WHERE tenant_id = :t AND full_name = :fn",
-        {"t": tenant_id, "fn": req.repo_full_name},
-    )
-    if not existing_repo:
-        _backend.db.execute(
-            "INSERT INTO repos (tenant_id, full_name, default_branch) VALUES (:t, :fn, :db)",
-            {"t": tenant_id, "fn": req.repo_full_name, "db": req.default_branch},
-        )
-
+    _insert_repo_if_new(tenant_id, req.repo_full_name, req.default_branch)
     return {"tenant_id": tenant_id, "repo_full_name": req.repo_full_name}
 
 
@@ -302,29 +299,153 @@ def _fetch_tenant(tenant_id: int) -> dict:
     }
 
 
-@app.get("/tenants/me")
-def get_current_tenant(_auth: dict = Depends(dual_auth)):
-    """Resolve the requester's tenant from their Clerk JWT. Prefers org-scoped
-    binding (clerk_org_id) and falls back to user-scoped (clerk_user_id) for
-    solo accounts where Clerk Organizations aren't enabled."""
-    if _auth.get("actor") != "user":
-        raise HTTPException(403, "GET /tenants/me requires a Clerk session")
-    org_id = _auth.get("org_id")
-    user_id = _auth.get("sub")
-    rows: list = []
+def _resolve_tenants_for_jwt(auth: dict) -> list[int]:
+    """Return tenant ids owned by the Clerk identity in the JWT. Multi-install
+    aware: a single user can have several tenants (one per GitHub App
+    installation). Org binding takes precedence over user binding so that
+    if a user is acting under their org, only org tenants are returned.
+
+    Order: most-recently-created first.
+    """
+    org_id = auth.get("org_id")
+    user_id = auth.get("sub")
     if org_id:
         rows = _backend.db.execute(
-            "SELECT id FROM tenants WHERE clerk_org_id = :o", {"o": org_id})
-    if not rows and user_id:
+            "SELECT id FROM tenants WHERE clerk_org_id = :o ORDER BY id DESC",
+            {"o": org_id},
+        )
+        if rows:
+            return [r["id"] for r in rows]
+    if user_id:
         rows = _backend.db.execute(
-            "SELECT id FROM tenants WHERE clerk_user_id = :u", {"u": user_id})
-    if not rows:
+            "SELECT id FROM tenants WHERE clerk_user_id = :u ORDER BY id DESC",
+            {"u": user_id},
+        )
+        return [r["id"] for r in rows]
+    return []
+
+
+def _require_user_actor(auth: dict, what: str) -> None:
+    if auth.get("actor") != "user":
+        raise HTTPException(403, f"{what} requires a Clerk session")
+
+
+def _upsert_clerk_binding(tenant_id: int, user_id: str | None, org_id: str | None) -> None:
+    """COALESCE Clerk identity onto a tenant — fills NULLs without overwriting
+    existing bindings. Used to backfill tenants created via the legacy CLI."""
+    _backend.db.execute(
+        """
+        UPDATE tenants
+        SET clerk_user_id = COALESCE(clerk_user_id, :u),
+            clerk_org_id  = COALESCE(clerk_org_id,  :o)
+        WHERE id = :t
+        """,
+        {"u": user_id, "o": org_id, "t": tenant_id},
+    )
+
+
+def _insert_repo_if_new(tenant_id: int, full_name: str, default_branch: str) -> None:
+    existing = _backend.db.execute(
+        "SELECT id FROM repos WHERE tenant_id = :t AND full_name = :fn",
+        {"t": tenant_id, "fn": full_name},
+    )
+    if not existing:
+        _backend.db.execute(
+            "INSERT INTO repos (tenant_id, full_name, default_branch) VALUES (:t, :fn, :db)",
+            {"t": tenant_id, "fn": full_name, "db": default_branch},
+        )
+
+
+@app.get("/tenants/me")
+def get_current_tenant(_auth: dict = Depends(dual_auth)):
+    """Legacy single-tenant resolver. Prefer /tenants/mine for multi-install."""
+    _require_user_actor(_auth, "GET /tenants/me")
+    ids = _resolve_tenants_for_jwt(_auth)
+    if not ids:
         raise HTTPException(
             404,
             "no tenant configured for this Clerk identity. "
-            "Run scripts/link_tenant_clerk_identity.py to backfill.",
+            "Connect a GitHub repo from the dashboard, or run "
+            "scripts/link_tenant_clerk_identity.py to backfill.",
         )
-    return _fetch_tenant(rows[0]["id"])
+    return _fetch_tenant(ids[0])
+
+
+@app.get("/tenants/mine")
+def list_my_tenants(_auth: dict = Depends(dual_auth)):
+    """Every tenant owned by the Clerk identity in the JWT."""
+    _require_user_actor(_auth, "GET /tenants/mine")
+    ids = _resolve_tenants_for_jwt(_auth)
+    return {"tenants": [_fetch_tenant(t) for t in ids]}
+
+
+@app.post("/tenants/connect", status_code=201)
+def connect_installation(
+    req: ConnectInstallationRequest,
+    _auth: dict = Depends(dual_auth),
+):
+    """Finalize a GitHub App install: mint installation token, list granted
+    repos, persist tenant + repos bound to the caller's Clerk identity.
+    Idempotent on installation_id (UNIQUE)."""
+    _require_user_actor(_auth, "POST /tenants/connect")
+
+    app_id = os.environ.get("GITHUB_APP_ID")
+    if not app_id:
+        raise HTTPException(503, "GITHUB_APP_ID is not configured on the control plane")
+
+    try:
+        token, _expires = installation_token_for(app_id, req.installation_id)
+        repos = list_installation_repos(token)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            502,
+            f"GitHub rejected installation_id={req.installation_id}: {e.response.status_code}",
+        )
+    if not repos:
+        raise HTTPException(
+            422,
+            "GitHub App installation has no repository access. "
+            "Re-install and grant access to at least one repo.",
+        )
+
+    # Every repo in one install shares an owner; take it from the first row.
+    github_owner = repos[0]["owner_login"]
+    user_id = _auth.get("sub")
+    org_id = _auth.get("org_id")
+
+    existing = _backend.db.execute(
+        "SELECT id FROM tenants WHERE github_installation_id = :inst",
+        {"inst": req.installation_id},
+    )
+    if existing:
+        tenant_id = existing[0]["id"]
+        _upsert_clerk_binding(tenant_id, user_id, org_id)
+    else:
+        new_rows = _backend.db.execute(
+            """
+            INSERT INTO tenants (name, github_owner, github_installation_id,
+                                 clerk_user_id, clerk_org_id)
+            VALUES (:name, :owner, :inst, :u, :o)
+            RETURNING id
+            """,
+            {
+                "name": github_owner,
+                "owner": github_owner,
+                "inst": req.installation_id,
+                "u": user_id,
+                "o": org_id,
+            },
+        )
+        tenant_id = new_rows[0]["id"]
+        logger.info(
+            "connected tenant %s (owner=%s, installation=%s, clerk=%s)",
+            tenant_id, github_owner, req.installation_id, user_id or org_id,
+        )
+
+    for repo in repos:
+        _insert_repo_if_new(tenant_id, repo["full_name"], repo["default_branch"])
+
+    return _fetch_tenant(tenant_id)
 
 
 @app.get("/tenants/{tenant_id}")
@@ -561,12 +682,16 @@ def _dispatch_ecs_run_task(
 
 def _spawn_run_ticket(
     *, tenant_id: int, ticket_id: str, ticket_title: str, ticket_body: str,
+    repo_id: int | None = None,
     approval_token: str | None = None,
     control_plane_url: str | None = None,
 ) -> tuple[int, str]:
     """Validate tenant+repo, pre-create the queued jobs row, then dispatch:
     - DEVFORGE_BACKEND=aws  → ecs.run_task() spawns a fresh Fargate task
     - otherwise (local)     → subprocess.Popen scripts.run_ticket
+
+    `repo_id` is the active repo from the frontend's switcher; when omitted
+    (legacy CLI path), we fall back to the tenant's first-by-id repo.
 
     Returns (job_id, dispatch_handle). The handle is a log path locally,
     or "ecs:<task_arn>" on AWS — opaque to callers.
@@ -576,13 +701,26 @@ def _spawn_run_ticket(
     )
     if not tenant_rows:
         raise HTTPException(404, f"tenant {tenant_id} not found")
-    repo_rows = _backend.db.execute(
-        "SELECT id FROM repos WHERE tenant_id = :t ORDER BY id LIMIT 1",
-        {"t": tenant_id},
-    )
-    if not repo_rows:
-        raise HTTPException(409, f"tenant {tenant_id} has no registered repos")
-    repo_id = repo_rows[0]["id"]
+
+    if repo_id is not None:
+        # Validate the repo belongs to this tenant. Stops cross-tenant smuggling.
+        repo_rows = _backend.db.execute(
+            "SELECT id FROM repos WHERE id = :r AND tenant_id = :t",
+            {"r": repo_id, "t": tenant_id},
+        )
+        if not repo_rows:
+            raise HTTPException(
+                404, f"repo {repo_id} not found under tenant {tenant_id}",
+            )
+    else:
+        # Legacy: pick the tenant's first-by-id repo. Used by the CLI path.
+        repo_rows = _backend.db.execute(
+            "SELECT id FROM repos WHERE tenant_id = :t ORDER BY id LIMIT 1",
+            {"t": tenant_id},
+        )
+        if not repo_rows:
+            raise HTTPException(409, f"tenant {tenant_id} has no registered repos")
+        repo_id = repo_rows[0]["id"]
 
     new_rows = _backend.db.execute(
         """
@@ -661,6 +799,7 @@ def submit_job(
 
     job_id, log_path = _spawn_run_ticket(
         tenant_id=req.tenant_id,
+        repo_id=req.repo_id,
         ticket_id=req.ticket_id,
         ticket_title=req.ticket_title,
         ticket_body=req.ticket_body,
@@ -689,6 +828,7 @@ def mint_approval_and_run(
     token = mint(command=req.command)
     job_id, _log = _spawn_run_ticket(
         tenant_id=req.tenant_id,
+        repo_id=req.repo_id,
         ticket_id=req.ticket_id,
         ticket_title=req.ticket_title,
         ticket_body=req.ticket_body,
@@ -707,7 +847,7 @@ def list_pending_approvals(_auth: dict = Depends(dual_auth)):
     """
     pending_jobs = _backend.db.execute(
         """
-        SELECT id, tenant_id, ticket_title, ticket_body, created_at
+        SELECT id, tenant_id, repo_id, ticket_title, ticket_body, created_at
         FROM jobs
         WHERE status = 'awaiting_approval'
         ORDER BY id DESC

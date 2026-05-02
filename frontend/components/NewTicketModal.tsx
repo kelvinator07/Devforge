@@ -2,7 +2,7 @@ import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import { X, Send } from "lucide-react";
+import { X, Send, Github } from "lucide-react";
 
 import { submitTicket } from "../lib/api";
 import { Button } from "./ui/Button";
@@ -10,11 +10,13 @@ import { Input, Textarea, Label } from "./ui/Input";
 
 type Props = {
   tenantId: number;
+  repoId: number;
+  repoFullName: string;
   open: boolean;
   onClose: () => void;
 };
 
-export function NewTicketModal({ tenantId, open, onClose }: Props) {
+export function NewTicketModal({ tenantId, repoId, repoFullName, open, onClose }: Props) {
   const { getToken } = useAuth();
   const router = useRouter();
   const [title, setTitle] = useState("");
@@ -50,6 +52,7 @@ export function NewTicketModal({ tenantId, open, onClose }: Props) {
     try {
       const { job_id } = await submitTicket(getToken, {
         tenant_id: tenantId,
+        repo_id: repoId,
         ticket_title: title.trim(),
         ticket_body: body.trim(),
       });
@@ -83,7 +86,12 @@ export function NewTicketModal({ tenantId, open, onClose }: Props) {
             <h2 id="new-ticket-title" className="text-[var(--text-h2)] font-semibold text-zinc-100">
               New ticket
             </h2>
-            <p className="mt-0.5 text-xs text-zinc-500">
+            <div className="mt-1 inline-flex items-center gap-1.5 text-xs text-zinc-400">
+              <Github className="h-3 w-3 text-zinc-500" />
+              <span>Submitting to</span>
+              <span className="font-mono text-zinc-200">{repoFullName}</span>
+            </div>
+            <p className="mt-1.5 text-xs text-zinc-500">
               Tickets are scanned for secrets before any agent runs.
             </p>
           </div>

@@ -217,7 +217,7 @@ async def run_job(
         })
 
     # Tenant lookup + installation token mint.
-    from backend.common import admin_headers
+    from backend.common import admin_headers, get_backend
     cp_headers = admin_headers()
     t = httpx.get(f"{api}/tenants/{tenant_id}", headers=cp_headers, timeout=15.0)
     t.raise_for_status()
@@ -225,10 +225,26 @@ async def run_job(
     if not tenant.get("repos"):
         _emit(None, "error", {"reason": "no repos registered for tenant"})
         return {"ok": False, "reason": "no repos"}
-    repo = tenant["repos"][0]
+
+    # Pick the specific repo this job was dispatched against. POST /jobs
+    # writes `jobs.repo_id` (validated against tenant ownership), so when
+    # the orchestrator runs against an existing job we honor that choice.
+    # Pure-CLI invocations without a pre-created job fall back to the
+    # tenant's first-by-id repo to preserve legacy behavior.
+    target_repo_id: int | None = None
+    if existing_job_id is not None:
+        rows = get_backend().db.execute(
+            "SELECT repo_id FROM jobs WHERE id = :j", {"j": existing_job_id},
+        )
+        if rows:
+            target_repo_id = rows[0]["repo_id"]
+    repo = next(
+        (r for r in tenant["repos"] if r["id"] == target_repo_id),
+        tenant["repos"][0],
+    )
     repo_full_name = repo["full_name"]
     repo_id = repo["id"]
-    _emit(None, "tenant_fetched", {"repo": repo_full_name})
+    _emit(None, "tenant_fetched", {"repo": repo_full_name, "repo_id": repo_id})
 
     tok = httpx.get(f"{api}/tenants/{tenant_id}/installation-token",
                     headers=cp_headers, timeout=30.0)

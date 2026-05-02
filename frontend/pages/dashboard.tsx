@@ -1,6 +1,6 @@
 import { SignedIn, SignedOut, RedirectToSignIn } from "@clerk/nextjs";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
   RefreshCw,
@@ -10,9 +10,16 @@ import {
   CheckCircle2,
   XCircle,
   Activity,
+  Github,
 } from "lucide-react";
 
-import { useApi, type Job, type Tenant } from "../lib/api";
+import {
+  GITHUB_APP_SLUG,
+  useApi,
+  type Job,
+  type Tenant,
+} from "../lib/api";
+import { resolveActive, setActive, startGithubInstall, useActive } from "../lib/active";
 import { StatusBadge } from "../components/StatusBadge";
 import { NewTicketModal } from "../components/NewTicketModal";
 import { Layout } from "../components/Layout";
@@ -46,9 +53,32 @@ const FILTER_LABELS: Record<StatusFilter, string> = {
 };
 
 function DashboardInner() {
-  const tenant = useApi<Tenant>("/tenants/me");
+  const tenants = useApi<{ tenants: Tenant[] }>("/tenants/mine");
+  const active = useActive();
+
+  const resolved = useMemo(
+    () => resolveActive(tenants.data?.tenants ?? [], active),
+    [tenants.data, active],
+  );
+  const activeTenant = resolved?.tenant ?? null;
+  const activeRepoId = resolved?.repoId ?? null;
+  const activeRepo =
+    activeTenant?.repos.find((r) => r.id === activeRepoId) ?? null;
+
+  // Auto-pin a default into the active store on first sign-in (no active set
+  // yet). Guarded by a ref so React strict-mode + setActive's event dispatch
+  // can't trigger a redundant pin pass.
+  const pinnedOnce = useRef(false);
+  useEffect(() => {
+    if (pinnedOnce.current) return;
+    if (!active && activeTenant && activeRepoId) {
+      setActive({ tenantId: activeTenant.id, repoId: activeRepoId });
+      pinnedOnce.current = true;
+    }
+  }, [active, activeTenant, activeRepoId]);
+
   const jobs = useApi<{ jobs: Job[] }>(
-    tenant.data ? `/jobs?tenant_id=${tenant.data.id}&limit=50` : null,
+    activeTenant ? `/jobs?tenant_id=${activeTenant.id}&limit=50` : null,
     { pollMs: 3000 },
   );
   const [newTicketOpen, setNewTicketOpen] = useState(false);
@@ -87,7 +117,7 @@ function DashboardInner() {
             size="sm"
             leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
             onClick={() => {
-              tenant.refresh();
+              tenants.refresh();
               jobs.refresh();
             }}
           >
@@ -96,7 +126,7 @@ function DashboardInner() {
           <Button
             size="sm"
             leftIcon={<Plus className="h-3.5 w-3.5" />}
-            disabled={!tenant.data}
+            disabled={!activeTenant}
             onClick={() => setNewTicketOpen(true)}
           >
             New ticket
@@ -104,48 +134,32 @@ function DashboardInner() {
         </div>
       </div>
 
-      {tenant.error && (
-        tenant.error.startsWith("404") ? (
-          <Card variant="accent" className="mb-6">
-            <div className="text-sm font-medium text-amber-200">
-              No tenant linked to this account.
-            </div>
-            <div className="mt-1 text-xs text-zinc-400">
-              Run the backfill once to link a tenant to your Clerk identity:
-            </div>
-            <pre className="mt-3 select-all rounded-md bg-zinc-950/60 p-3 font-mono text-[11px] text-zinc-300">
-{`uv run python -m scripts.link_tenant_clerk_identity <tenant_id> --user <your_clerk_user_id>`}
-            </pre>
-          </Card>
-        ) : (
-          <ErrorCard msg={tenant.error} />
-        )
-      )}
+      {tenants.error && <ErrorCard msg={tenants.error} />}
 
-      {tenant.data && (
+      {tenants.data && !activeTenant && <ConnectRepoEmptyState />}
+
+      {activeTenant && activeRepo && (
         <Card className="mb-6" padding="md">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <div className="text-xs uppercase tracking-wide text-zinc-500">Tenant</div>
-              <div className="mt-0.5 text-base font-medium text-zinc-100">{tenant.data.name}</div>
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Active repo</div>
+              <div className="mt-0.5 flex items-center gap-2 text-base font-medium text-zinc-100">
+                <Github className="h-4 w-4 text-zinc-400" />
+                <span className="font-mono">{activeRepo.full_name}</span>
+              </div>
               <div className="mt-1 text-xs text-zinc-400">
-                owner <span className="text-zinc-200">{tenant.data.github_owner}</span>
+                tenant <span className="text-zinc-200">{activeTenant.name}</span>
                 {" · install "}
-                <span className="font-mono text-zinc-200">{tenant.data.github_installation_id}</span>
+                <span className="font-mono text-zinc-200">{activeTenant.github_installation_id}</span>
               </div>
             </div>
-            <div className="flex flex-col gap-1 text-right">
-              {tenant.data.repos.map((r) => (
-                <div key={r.id} className="flex items-center gap-1.5 text-sm text-zinc-300">
-                  <span className="font-mono">{r.full_name}</span>
-                  <Badge tone="neutral">{r.default_branch}</Badge>
-                </div>
-              ))}
-            </div>
+            <Badge tone="neutral">{activeRepo.default_branch}</Badge>
           </div>
         </Card>
       )}
 
+      {activeTenant && (
+      <>
       <section className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatBox label="Total" value={totalJobs} icon={<Inbox className="h-4 w-4" />} />
         <StatBox label="Running" value={running} icon={<Activity className="h-4 w-4" />} tone="indigo" />
@@ -215,7 +229,7 @@ function DashboardInner() {
                   size="sm"
                   leftIcon={<Plus className="h-3.5 w-3.5" />}
                   onClick={() => setNewTicketOpen(true)}
-                  disabled={!tenant.data}
+                  disabled={!activeTenant}
                 >
                   New ticket
                 </Button>
@@ -288,10 +302,14 @@ function DashboardInner() {
           </Card>
         )}
       </section>
+      </>
+      )}
 
-      {tenant.data && (
+      {activeTenant && activeRepo && (
         <NewTicketModal
-          tenantId={tenant.data.id}
+          tenantId={activeTenant.id}
+          repoId={activeRepo.id}
+          repoFullName={activeRepo.full_name}
           open={newTicketOpen}
           onClose={() => {
             setNewTicketOpen(false);
@@ -351,6 +369,39 @@ function StatBox({
         </div>
       </div>
     </Card>
+  );
+}
+
+function ConnectRepoEmptyState() {
+  if (!GITHUB_APP_SLUG) {
+    return (
+      <Card variant="accent" className="mb-6">
+        <div className="text-sm font-medium text-amber-200">GitHub App not configured</div>
+        <div className="mt-1 text-xs text-zinc-400">
+          Set <code className="font-mono">NEXT_PUBLIC_GITHUB_APP_SLUG</code> in
+          {" "}<code className="font-mono">frontend/.env.local</code> to the slug of
+          your GitHub App, then rebuild the frontend.
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <EmptyState
+      className="mb-6"
+      icon={<Github className="h-5 w-5" />}
+      title="Connect a GitHub repo"
+      caption="Install the DevForge GitHub App on your account or org. You'll pick which repos to grant access to on the GitHub install page."
+      action={
+        <Button
+          size="md"
+          leftIcon={<Github className="h-4 w-4" />}
+          onClick={startGithubInstall}
+        >
+          Connect GitHub repo
+        </Button>
+      }
+    />
   );
 }
 

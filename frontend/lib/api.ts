@@ -12,6 +12,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export const API = process.env.NEXT_PUBLIC_DEVFORGE_API || "http://localhost:8001";
 export const LANGFUSE_HOST = process.env.NEXT_PUBLIC_LANGFUSE_HOST || "https://cloud.langfuse.com";
 export const LANGFUSE_PROJECT_ID = process.env.NEXT_PUBLIC_LANGFUSE_PROJECT_ID || "";
+export const GITHUB_APP_SLUG = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG || "";
+
+/** Build the GitHub App install URL the user is redirected to from
+ * "Connect GitHub repo". Returns null when the slug isn't configured —
+ * the dashboard hides the CTA in that case to avoid a broken click. */
+export function githubInstallUrl(state: string): string | null {
+  if (!GITHUB_APP_SLUG) return null;
+  return `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new?state=${encodeURIComponent(state)}`;
+}
 
 /** Build a deep link to a trace on LangFuse. Returns null when the project id
  * isn't configured — the UI falls back to hiding the link.
@@ -51,18 +60,34 @@ export type JobEvent = {
 export type PendingApproval = {
   id: number;
   tenant_id: number;
+  repo_id: number;
   ticket_title: string;
   ticket_body: string;
   approval_command: string | null;
   created_at: string;
 };
 
-/** Build headers including the Clerk JWT (when available). */
-async function buildHeaders(getToken: () => Promise<string | null>): Promise<HeadersInit> {
-  const headers: Record<string, string> = {};
+/** Build headers including the Clerk JWT (when available). Pass `extra` to
+ * merge in per-call headers like Content-Type. */
+async function buildHeaders(
+  getToken: () => Promise<string | null>,
+  extra?: Record<string, string>,
+): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { ...(extra ?? {}) };
   const tok = await getToken();
   if (tok) headers["Authorization"] = `Bearer ${tok}`;
   return headers;
+}
+
+/** Pull a structured error detail off a non-OK Response. Tries JSON
+ * `{detail: ...}` first, falls back to text. */
+async function readErrorBody(r: Response): Promise<unknown> {
+  try {
+    const j = await r.json();
+    return (j as { detail?: unknown }).detail ?? j;
+  } catch {
+    return r.text().catch(() => "");
+  }
 }
 
 /** Hook: typed wrapper for a one-shot GET. Returns {data, loading, error, refresh}.
@@ -111,30 +136,33 @@ export function useApi<T>(path: string | null, opts?: { pollMs?: number }) {
   return { data, loading, error, refresh };
 }
 
-/** POST /jobs — submit a ticket through the full crew. Returns the new job id.
- * Pre-flight rejects tickets with embedded secrets via 422; the caller surfaces
- * those as form errors. */
+/** POST /jobs — submit a ticket through the full crew. Pre-flight rejects
+ * tickets with live-shaped secrets via 422; callers surface as form errors. */
 export async function submitTicket(
   getToken: () => Promise<string | null>,
-  body: { tenant_id: number; ticket_title: string; ticket_body: string; ticket_id?: string; approval_token?: string },
+  body: {
+    tenant_id: number;
+    repo_id?: number;
+    ticket_title: string;
+    ticket_body: string;
+    ticket_id?: string;
+    approval_token?: string;
+  },
 ): Promise<{ job_id: number }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const tok = await getToken();
-  if (tok) headers["Authorization"] = `Bearer ${tok}`;
+  const headers = await buildHeaders(getToken, { "Content-Type": "application/json" });
   const r = await fetch(`${API}/jobs`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
   });
   if (!r.ok) {
-    let detail: unknown = null;
-    try { detail = (await r.json()).detail; } catch { /* not JSON */ }
+    const detail = await readErrorBody(r);
     if (r.status === 422 && detail && typeof detail === "object") {
       const d = detail as { reason?: string; findings?: { summary?: string }[] };
       const summaries = (d.findings ?? []).map((f) => f.summary).filter(Boolean).join("; ");
       throw new Error(`${d.reason ?? "rejected"}: ${summaries || "see findings"}`);
     }
-    throw new Error(`submit ticket failed: ${r.status} ${typeof detail === "string" ? detail : await r.text()}`);
+    throw new Error(`submit ticket failed: ${r.status} ${typeof detail === "string" ? detail : ""}`);
   }
   return r.json() as Promise<{ job_id: number }>;
 }
@@ -150,19 +178,52 @@ export async function mintApprovalAndRun(
   req: {
     command: string;
     tenant_id: number;
+    repo_id?: number;
     ticket_title: string;
     ticket_body: string;
     ticket_id?: string;
   },
 ): Promise<{ token: string; command: string; job_id: number }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const tok = await getToken();
-  if (tok) headers["Authorization"] = `Bearer ${tok}`;
+  const headers = await buildHeaders(getToken, { "Content-Type": "application/json" });
   const r = await fetch(`${API}/approvals/run`, {
     method: "POST",
     headers,
     body: JSON.stringify(req),
   });
-  if (!r.ok) throw new Error(`mint+run failed: ${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const detail = await readErrorBody(r);
+    throw new Error(`mint+run failed: ${r.status} ${typeof detail === "string" ? detail : ""}`);
+  }
   return r.json() as Promise<{ token: string; command: string; job_id: number }>;
+}
+
+
+/** GET /tenants/mine — every tenant the signed-in Clerk identity owns. */
+export async function listMyTenants(
+  getToken: () => Promise<string | null>,
+): Promise<{ tenants: Tenant[] }> {
+  const headers = await buildHeaders(getToken);
+  const r = await fetch(`${API}/tenants/mine`, { headers });
+  if (!r.ok) throw new Error(`list tenants failed: ${r.status} ${await r.text()}`);
+  return r.json() as Promise<{ tenants: Tenant[] }>;
+}
+
+
+/** POST /tenants/connect — finalize a GitHub App install. Idempotent on
+ * installation_id; re-calling refreshes the repo list. */
+export async function connectInstallation(
+  getToken: () => Promise<string | null>,
+  req: { installation_id: number; state: string },
+): Promise<Tenant> {
+  const headers = await buildHeaders(getToken, { "Content-Type": "application/json" });
+  const r = await fetch(`${API}/tenants/connect`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    const detail = await readErrorBody(r);
+    throw new Error(`connect failed: ${r.status} ${typeof detail === "string" ? detail : ""}`);
+  }
+  return r.json() as Promise<Tenant>;
 }

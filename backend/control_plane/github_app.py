@@ -20,6 +20,14 @@ from backend.common import get_backend
 GITHUB_API = "https://api.github.com"
 
 
+def _gh_headers(bearer: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
 def get_private_key() -> str:
     return get_backend().secrets.get("github-app-private-key")
 
@@ -35,14 +43,9 @@ def make_app_jwt(private_key_pem: str, app_id: str | int) -> str:
 
 
 def mint_installation_token(app_jwt: str, installation_id: str | int) -> tuple[str, str]:
-    url = f"{GITHUB_API}/app/installations/{installation_id}/access_tokens"
     r = httpx.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {app_jwt}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        f"{GITHUB_API}/app/installations/{installation_id}/access_tokens",
+        headers=_gh_headers(app_jwt),
         timeout=15.0,
     )
     r.raise_for_status()
@@ -54,3 +57,29 @@ def installation_token_for(app_id: str | int, installation_id: str | int) -> tup
     pk = get_private_key()
     app_jwt = make_app_jwt(pk, app_id)
     return mint_installation_token(app_jwt, installation_id)
+
+
+def list_installation_repos(token: str) -> list[dict]:
+    """List every repo an installation can access. Paginates per_page=100."""
+    out: list[dict] = []
+    page = 1
+    while True:
+        r = httpx.get(
+            f"{GITHUB_API}/installation/repositories",
+            params={"per_page": 100, "page": page},
+            headers=_gh_headers(token),
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        for repo in data.get("repositories", []):
+            out.append({
+                "full_name": repo["full_name"],
+                "default_branch": repo.get("default_branch") or "main",
+                "owner_login": repo["owner"]["login"],
+                "private": bool(repo.get("private", False)),
+            })
+        if len(out) >= data.get("total_count", 0):
+            break
+        page += 1
+    return out

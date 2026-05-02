@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
 import type { ReactNode } from "react";
-import { UserButton } from "@clerk/nextjs";
+import { SignedIn, UserButton } from "@clerk/nextjs";
 import { LayoutDashboard, ShieldCheck, Github } from "lucide-react";
 import { Brand } from "./Brand";
+import { RepoSwitcher } from "./RepoSwitcher";
 
 type Width = "narrow" | "default" | "wide";
 
@@ -39,10 +40,13 @@ function TopNav() {
   return (
     <header className="sticky top-0 z-30 border-b border-[var(--border)] bg-[var(--background)]/80 backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
-        <div className="flex items-center gap-8">
+        <div className="flex items-center gap-6">
           <Link href="/dashboard" className="focus-ring rounded-md no-underline">
             <Brand />
           </Link>
+          <SignedIn>
+            <RepoSwitcher />
+          </SignedIn>
           <nav className="hidden items-center gap-1 md:flex">
             <NavLink
               href="/dashboard"

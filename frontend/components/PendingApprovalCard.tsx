@@ -27,6 +27,7 @@ export function PendingApprovalCard({ item }: Props) {
       const { job_id } = await mintApprovalAndRun(getToken, {
         command: item.approval_command,
         tenant_id: item.tenant_id,
+        repo_id: item.repo_id,
         ticket_title: item.ticket_title,
         ticket_body: item.ticket_body,
       });

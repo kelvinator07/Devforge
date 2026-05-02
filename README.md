@@ -190,12 +190,12 @@ cp frontend/.env.example frontend/.env.local     # edit: NEXT_PUBLIC_CLERK_PUBLI
 make setup        # build images, install deps, run migrations (one-time)
 make dev          # control-plane :8001 + frontend :3000
 
-# One-time: link tenant 1 to your Clerk user (so /tenants/me resolves)
-make shell
-> uv run python -m scripts.link_tenant_clerk_identity 1 --user user_<your-id>
-> exit
+# Open http://localhost:3000, sign in via Clerk, click "Connect GitHub repo".
+# GitHub install page opens in the same tab — pick which repos to grant access
+# to, then GitHub redirects back to /connect/callback. The callback creates
+# your tenant + repo rows automatically; no CLI step required.
 
-make seed         # populate + index the demo GitHub repo (one-time)
+make seed         # populate + index the demo GitHub repo (one-time, optional)
 make ticket       # run the default demo ticket E2E through the crew
 make test         # 106 pytest + 9 vitest unit tests, ~3s, $0
 make redteam      # 9/9 deterministic guardrails, $0
