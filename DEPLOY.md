@@ -16,7 +16,8 @@ The operational companion to the project [README](README.md). The README covers 
 | `uv` 0.11+ installed | Python package and project manager |
 | Node 20+ + `npm` | Builds the static frontend export |
 | OpenRouter API key | LLM inference for all agents |
-| GitHub App created (one per AWS environment) — note the App ID + download the PEM | Per-tenant install tokens; see `scripts/install_github_app.py` for the onboarding helper |
+| GitHub App created (one per AWS environment) — note the App ID, **slug** (URL fragment), and download the PEM | Per-tenant install tokens. The browser-driven onboarding flow ([README quickstart](README.md#quickstart-local--docker--makefile)) reads the App slug from `NEXT_PUBLIC_GITHUB_APP_SLUG` and redirects users to its install page. CLI path is preserved via `scripts/install_github_app.py`. |
+| GitHub App **Setup URL + Callback URL** set to `<frontend-url>/connect/callback` | After install, GitHub redirects users to this URL with `installation_id`. The frontend page calls `POST /tenants/connect` to finalize. Must point at the same origin the user signs in from (CloudFront URL on AWS, `http://localhost:3000` for local dev). |
 | Clerk **production** application (`pk_live_…`, `sk_live_…`, JWKS URL) | Browser-side JWT auth on the deployed control plane |
 | LangFuse cloud project (optional) — public + secret keys + project id | One-trace-per-job observability + the `view trace ↗` deep-link |
 
@@ -129,9 +130,12 @@ Create `frontend/.env.production` (gitignored) with prod values:
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_…
 CLERK_SECRET_KEY=sk_live_…
 NEXT_PUBLIC_DEVFORGE_API=<API_URL from step 5>
+NEXT_PUBLIC_GITHUB_APP_SLUG=<your-app-slug>
 NEXT_PUBLIC_LANGFUSE_PROJECT_ID=…
 NEXT_PUBLIC_LANGFUSE_HOST=https://cloud.langfuse.com
 ```
+
+The slug is the lowercase URL fragment from your GitHub App settings (`https://github.com/apps/<this>`). The dashboard's "Connect GitHub repo" CTA reads it to build the install URL. **Make sure you've also set the App's Setup URL + Callback URL to `<cloudfront-url>/connect/callback`** before users connect — otherwise GitHub won't redirect them back after install.
 
 Then:
 ```bash
