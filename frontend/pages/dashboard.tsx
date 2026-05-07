@@ -20,6 +20,8 @@ import {
   type Tenant,
 } from "../lib/api";
 import { resolveActive, setActive, startGithubInstall, useActive } from "../lib/active";
+import { tenantRepoFullNames, useRepoLanguages } from "../lib/repoLanguages";
+import { type IndexStatus } from "../lib/indexJobs";
 import { StatusBadge } from "../components/StatusBadge";
 import { NewTicketModal } from "../components/NewTicketModal";
 import { Layout } from "../components/Layout";
@@ -56,9 +58,13 @@ function DashboardInner() {
   const tenants = useApi<{ tenants: Tenant[] }>("/tenants/mine");
   const active = useActive();
 
+  const tenantList = tenants.data?.tenants ?? [];
+  const fullNames = useMemo(() => tenantRepoFullNames(tenantList), [tenantList]);
+  const { languages } = useRepoLanguages(fullNames);
+
   const resolved = useMemo(
-    () => resolveActive(tenants.data?.tenants ?? [], active),
-    [tenants.data, active],
+    () => resolveActive(tenantList, active, languages),
+    [tenantList, active, languages],
   );
   const activeTenant = resolved?.tenant ?? null;
   const activeRepoId = resolved?.repoId ?? null;
@@ -81,6 +87,20 @@ function DashboardInner() {
     activeTenant ? `/jobs?tenant_id=${activeTenant.id}&limit=50` : null,
     { pollMs: 3000 },
   );
+
+  // Cache the active repo's index status so we can nudge the user toward
+  // the setup page when they haven't indexed yet. Poll while not indexed
+  // (so the banner clears within ~10s when indexing finishes in another tab),
+  // then stop — once it's indexed, status is stable.
+  const indexStatus = useApi<IndexStatus>(
+    activeRepo ? `/repos/${activeRepo.id}/index-status` : null,
+  );
+  useEffect(() => {
+    if (indexStatus.data?.indexed) return;
+    if (!activeRepo) return;
+    const handle = setInterval(() => indexStatus.refresh(), 10_000);
+    return () => clearInterval(handle);
+  }, [indexStatus.data?.indexed, activeRepo, indexStatus.refresh]);
   const [newTicketOpen, setNewTicketOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
@@ -126,7 +146,7 @@ function DashboardInner() {
           <Button
             size="sm"
             leftIcon={<Plus className="h-3.5 w-3.5" />}
-            disabled={!activeTenant}
+            disabled={!activeTenant || !indexStatus.data?.indexed}
             onClick={() => setNewTicketOpen(true)}
           >
             New ticket
@@ -154,6 +174,28 @@ function DashboardInner() {
               </div>
             </div>
             <Badge tone="neutral">{activeRepo.default_branch}</Badge>
+          </div>
+        </Card>
+      )}
+
+      {activeTenant && activeRepo && indexStatus.data && !indexStatus.data.indexed && (
+        <Card variant="accent" className="mb-6" padding="md">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-amber-200">
+                Codebase not indexed
+              </div>
+              <div className="mt-1 text-xs text-zinc-400">
+                Agents will plan tickets without code-grounded context. Set up
+                indexing so the Lead can reference real files in this repo.
+              </div>
+            </div>
+            <Link
+              href={`/projects/${activeTenant.id}/${activeRepo.id}/setup`}
+              className="focus-ring inline-flex shrink-0 items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-200 no-underline hover:bg-amber-500/20"
+            >
+              Set up indexing
+            </Link>
           </div>
         </Card>
       )}
@@ -229,7 +271,7 @@ function DashboardInner() {
                   size="sm"
                   leftIcon={<Plus className="h-3.5 w-3.5" />}
                   onClick={() => setNewTicketOpen(true)}
-                  disabled={!activeTenant}
+                  disabled={!activeTenant || !indexStatus.data?.indexed}
                 >
                   New ticket
                 </Button>
@@ -390,8 +432,8 @@ function ConnectRepoEmptyState() {
     <EmptyState
       className="mb-6"
       icon={<Github className="h-5 w-5" />}
-      title="Connect a GitHub repo"
-      caption="Install the DevForge GitHub App on your account or org. You'll pick which repos to grant access to on the GitHub install page."
+      title="Connect a Python repo"
+      caption="Install the DevForge GitHub App on your account or org and grant access to a public Python repo. Non-Python repos are filtered out of the picker."
       action={
         <Button
           size="md"

@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 
 import { type Tenant, GITHUB_APP_SLUG, githubInstallUrl } from "./api";
+import { isPythonLanguage } from "./repoLanguages";
 
 export const STATE_KEY = "devforge.install.state";
 const STORAGE_KEY = "devforge.active";
@@ -82,19 +83,31 @@ export function useActive(): Active | null {
 }
 
 /** Resolve {tenant, repo} from a tenants list + the active store. Falls back
- * to the first tenant's first repo when active is unset/stale. */
+ * to the first tenant's first repo when active is unset/stale.
+ *
+ * When `languages` is supplied, only repos whose primary language is Python
+ * are eligible — both the active pin and the fallback respect the filter.
+ * Returns null if no tenant has any allowed repo. Without `languages`,
+ * behavior is unchanged. */
 export function resolveActive(
   tenants: Tenant[],
   active: Active | null,
+  languages?: Map<string, string | null>,
 ): { tenant: Tenant; repoId: number } | null {
   if (!tenants.length) return null;
+  const isAllowed = (r: { full_name: string }): boolean =>
+    !languages || isPythonLanguage(languages.get(r.full_name));
+
   const tenant =
-    (active && tenants.find((t) => t.id === active.tenantId)) ?? tenants[0];
-  if (!tenant.repos.length) return null;
+    (active && tenants.find((t) => t.id === active.tenantId && t.repos.some(isAllowed))) ??
+    tenants.find((t) => t.repos.some(isAllowed));
+  if (!tenant) return null;
+
+  const allowed = tenant.repos.filter(isAllowed);
   const repo =
     (active && active.tenantId === tenant.id
-      ? tenant.repos.find((r) => r.id === active.repoId)
-      : null) ?? tenant.repos[0];
+      ? allowed.find((r) => r.id === active.repoId)
+      : null) ?? allowed[0];
   return { tenant, repoId: repo.id };
 }
 

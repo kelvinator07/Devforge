@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronsUpDown, Check, Github, Plus } from "lucide-react";
+import Link from "next/link";
+import { ChevronsUpDown, Check, Github, Plus, Wrench } from "lucide-react";
 
 import { GITHUB_APP_SLUG, useApi, type Tenant } from "../lib/api";
 import { setActive, startGithubInstall, useActive } from "../lib/active";
+import { filterToPython, tenantRepoFullNames, useRepoLanguages } from "../lib/repoLanguages";
 
 /** Top-nav repo picker. Lists every (tenant, repo) the signed-in Clerk
  * user has connected, grouped by tenant. Click sets active; "+ Connect
@@ -34,6 +36,14 @@ export function RepoSwitcher() {
 
   const list = tenants.data?.tenants ?? [];
 
+  const fullNames = useMemo(() => tenantRepoFullNames(list), [list]);
+  const { languages, loading: langLoading, rateLimited } = useRepoLanguages(fullNames);
+  // On 403, fall back to the un-filtered list so the user isn't locked out.
+  const filteredList = useMemo(
+    () => (rateLimited ? list : filterToPython(list, languages)),
+    [list, languages, rateLimited],
+  );
+
   const activeRepoLabel = useMemo(() => {
     if (!active || !list.length) return null;
     const t = list.find((tt) => tt.id === active.tenantId);
@@ -46,6 +56,9 @@ export function RepoSwitcher() {
   if (!tenants.data) return null;
   // No tenants yet — the dashboard's empty-state handles connect.
   if (!list.length) return null;
+
+  const showDetectingHint =
+    langLoading && !rateLimited && filteredList.every((t) => t.repos.length === 0);
 
   return (
     <div ref={popoverRef} className="relative">
@@ -71,45 +84,70 @@ export function RepoSwitcher() {
           role="listbox"
         >
           <div className="max-h-72 overflow-y-auto py-1">
-            {list.map((t) => (
+            {showDetectingHint && (
+              <div className="px-3 pb-1.5 text-[11px] text-zinc-500 italic">
+                Detecting languages…
+              </div>
+            )}
+            {filteredList.map((t) => {
+              const original = list.find((o) => o.id === t.id);
+              const hidden = (original?.repos.length ?? 0) - t.repos.length;
+              return (
               <div key={t.id} className="pb-1">
                 <div className="px-2 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                   {t.github_owner}
                 </div>
                 {t.repos.length === 0 && (
                   <div className="px-3 pb-1 text-xs text-zinc-600 italic">
-                    no repos in this install
+                    {original?.repos.length
+                      ? `no Python repos in this install · ${hidden} hidden`
+                      : "no repos in this install"}
                   </div>
                 )}
                 {t.repos.map((r) => {
                   const isActive =
                     active?.tenantId === t.id && active?.repoId === r.id;
                   return (
-                    <button
-                      key={r.id}
-                      type="button"
-                      onClick={() => {
-                        setActive({ tenantId: t.id, repoId: r.id });
-                        setOpen(false);
-                      }}
-                      className={[
-                        "focus-ring flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs",
-                        "transition-colors duration-[var(--dur-fast)] ease-[var(--ease)]",
-                        isActive
-                          ? "bg-indigo-500/10 text-indigo-200"
-                          : "text-zinc-300 hover:bg-zinc-800/60 hover:text-zinc-100",
-                      ].join(" ")}
-                      role="option"
-                      aria-selected={isActive}
-                    >
-                      <span className="truncate font-mono">{r.full_name}</span>
-                      {isActive && <Check className="h-3 w-3 shrink-0 text-indigo-300" />}
-                    </button>
+                    <div key={r.id} className="group flex items-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActive({ tenantId: t.id, repoId: r.id });
+                          setOpen(false);
+                        }}
+                        className={[
+                          "focus-ring flex flex-1 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs",
+                          "transition-colors duration-[var(--dur-fast)] ease-[var(--ease)]",
+                          isActive
+                            ? "bg-indigo-500/10 text-indigo-200"
+                            : "text-zinc-300 hover:bg-zinc-800/60 hover:text-zinc-100",
+                        ].join(" ")}
+                        role="option"
+                        aria-selected={isActive}
+                      >
+                        <span className="truncate font-mono">{r.full_name}</span>
+                        {isActive && <Check className="h-3 w-3 shrink-0 text-indigo-300" />}
+                      </button>
+                      <Link
+                        href={`/projects/${t.id}/${r.id}/setup`}
+                        onClick={() => setOpen(false)}
+                        title="Set up indexing"
+                        className="focus-ring ml-1 rounded-md p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-800/60 hover:text-zinc-200 group-hover:opacity-100 focus:opacity-100"
+                      >
+                        <Wrench className="h-3 w-3" />
+                      </Link>
+                    </div>
                   );
                 })}
               </div>
-            ))}
+              );
+            })}
           </div>
+          {rateLimited && (
+            <div className="border-t border-[var(--border)] px-3 py-1.5 text-[11px] text-amber-400/80">
+              GitHub rate limit hit — showing all repos. Try again in an hour.
+            </div>
+          )}
           {GITHUB_APP_SLUG && (
             <div className="border-t border-[var(--border)] pt-1">
               <button

@@ -69,7 +69,7 @@ export type PendingApproval = {
 
 /** Build headers including the Clerk JWT (when available). Pass `extra` to
  * merge in per-call headers like Content-Type. */
-async function buildHeaders(
+export async function buildHeaders(
   getToken: () => Promise<string | null>,
   extra?: Record<string, string>,
 ): Promise<Record<string, string>> {
@@ -81,7 +81,7 @@ async function buildHeaders(
 
 /** Pull a structured error detail off a non-OK Response. Tries JSON
  * `{detail: ...}` first, falls back to text. */
-async function readErrorBody(r: Response): Promise<unknown> {
+export async function readErrorBody(r: Response): Promise<unknown> {
   try {
     const j = await r.json();
     return (j as { detail?: unknown }).detail ?? j;

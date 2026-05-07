@@ -27,7 +27,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from mangum import Mangum
 from pydantic import BaseModel, Field
 
@@ -526,6 +526,266 @@ async def job_sse(job_id: int):
                 break
 
             # Heartbeat every 15 idle seconds so proxies don't time out.
+            idle_ticks += 1
+            if idle_ticks % 15 == 0:
+                yield ": keepalive\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ============================================================================
+# Repo indexing (RAG): per-repo status + on-demand index jobs
+# ============================================================================
+
+def _authorize_repo(auth: dict, repo_id: int) -> dict:
+    """Look up the repo, then run tenant-membership auth. Returns the repo row."""
+    rows = _backend.db.execute(
+        "SELECT id, tenant_id, full_name FROM repos WHERE id = :r",
+        {"r": repo_id},
+    )
+    if not rows:
+        raise HTTPException(404, "repo not found")
+    _authorize_tenant_admin(auth, rows[0]["tenant_id"])
+    return rows[0]
+
+
+def _dispatch_subprocess_index(*, index_job_id: int) -> str:
+    """Spawn `scripts.run_index_job` as a detached subprocess. Returns log path."""
+    import subprocess
+    env = dict(os.environ)
+    log_dir = _REPO_ROOT / "data" / "index_job_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"index_job_{index_job_id}.log"
+    log_fp = log_path.open("a")
+    subprocess.Popen(
+        ["uv", "run", "python", "-m", "scripts.run_index_job", str(index_job_id)],
+        cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=log_fp,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return str(log_path)
+
+
+def _dispatch_ecs_run_index_job(*, index_job_id: int, control_plane_url: str) -> str:
+    """Fire one Fargate task for an index job. Mirrors _dispatch_ecs_run_task."""
+    global _ECS_CLIENT
+    if _ECS_CLIENT is None:
+        import boto3
+        _ECS_CLIENT = boto3.client("ecs")
+
+    cluster  = os.environ["ECS_CLUSTER"]
+    task_def = os.environ["ECS_TASK_DEFINITION"]
+    subnets  = [s for s in os.environ["ECS_SUBNETS"].split(",") if s]
+    sg       = os.environ["ECS_SECURITY_GROUP"]
+
+    resp = _ECS_CLIENT.run_task(
+        cluster=cluster,
+        taskDefinition=task_def,
+        launchType="FARGATE",
+        count=1,
+        networkConfiguration={
+            "awsvpcConfiguration": {
+                "subnets": subnets,
+                "securityGroups": [sg],
+                "assignPublicIp": "ENABLED",
+            },
+        },
+        overrides={
+            "containerOverrides": [{
+                "name": "worker",
+                "command": [
+                    "uv", "run", "python", "-m",
+                    "scripts.run_index_job", str(index_job_id),
+                ],
+                "environment": [
+                    {"name": "CONTROL_PLANE_API", "value": control_plane_url},
+                ],
+            }],
+        },
+    )
+    failures = resp.get("failures") or []
+    if failures:
+        raise HTTPException(
+            502, f"ecs.run_task failed: {failures[0].get('reason', 'unknown')}",
+        )
+    tasks = resp.get("tasks") or []
+    task_arn = tasks[0]["taskArn"] if tasks else "<unknown>"
+    return f"ecs:{task_arn}"
+
+
+def _spawn_run_index_job(
+    *, tenant_id: int, repo_id: int, control_plane_url: str | None = None,
+) -> tuple[int, str]:
+    """Insert a queued index_jobs row, then dispatch the worker. Returns (id, handle)."""
+    new_rows = _backend.db.execute(
+        "INSERT INTO index_jobs (tenant_id, repo_id, status) "
+        "VALUES (:t, :r, 'queued') RETURNING id",
+        {"t": tenant_id, "r": repo_id},
+    )
+    index_job_id = new_rows[0]["id"]
+
+    if os.environ.get("DEVFORGE_BACKEND") == "aws":
+        if not control_plane_url:
+            raise HTTPException(
+                500,
+                "AWS mode dispatch requires control_plane_url; FastAPI route handler "
+                "must pass `request.base_url` through to _spawn_run_index_job.",
+            )
+        handle = _dispatch_ecs_run_index_job(
+            index_job_id=index_job_id, control_plane_url=control_plane_url,
+        )
+    else:
+        handle = _dispatch_subprocess_index(index_job_id=index_job_id)
+    return index_job_id, handle
+
+
+@app.get("/repos/{repo_id}/index-status")
+def get_index_status(repo_id: int, _auth: dict = Depends(dual_auth)):
+    """Return whether this repo has ever been indexed and the latest job's state."""
+    _authorize_repo(_auth, repo_id)
+    rows = _backend.db.execute(
+        """
+        SELECT id, status, files_indexed, chunks_written, error,
+               created_at, started_at, finished_at
+        FROM index_jobs
+        WHERE repo_id = :r
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"r": repo_id},
+    )
+    if not rows:
+        return {
+            "indexed": False,
+            "last_indexed_at": None,
+            "latest_job_id": None,
+            "latest_status": None,
+            "files_indexed": None,
+            "chunks_written": None,
+            "error": None,
+        }
+    latest = rows[0]
+    completed = _backend.db.execute(
+        "SELECT finished_at, files_indexed, chunks_written FROM index_jobs "
+        "WHERE repo_id = :r AND status = 'completed' "
+        "ORDER BY id DESC LIMIT 1",
+        {"r": repo_id},
+    )
+    last_completed = completed[0] if completed else None
+    return {
+        "indexed": last_completed is not None,
+        "last_indexed_at": last_completed["finished_at"] if last_completed else None,
+        "latest_job_id": latest["id"],
+        "latest_status": latest["status"],
+        "files_indexed": (last_completed or latest)["files_indexed"],
+        "chunks_written": (last_completed or latest)["chunks_written"],
+        "error": latest["error"],
+    }
+
+
+@app.post("/repos/{repo_id}/index", status_code=202)
+def start_index(repo_id: int, request: Request, _auth: dict = Depends(dual_auth)):
+    """Kick off an indexing job. Idempotent: if one is already running/queued
+    for this repo, returns the existing index_job_id with 200 instead of 202."""
+    repo = _authorize_repo(_auth, repo_id)
+    in_flight = _backend.db.execute(
+        "SELECT id FROM index_jobs WHERE repo_id = :r AND status IN ('queued', 'running') "
+        "ORDER BY id DESC LIMIT 1",
+        {"r": repo_id},
+    )
+    if in_flight:
+        return JSONResponse(
+            status_code=200,
+            content={"index_job_id": in_flight[0]["id"], "already_running": True},
+        )
+    index_job_id, _handle = _spawn_run_index_job(
+        tenant_id=repo["tenant_id"],
+        repo_id=repo_id,
+        control_plane_url=_control_plane_url(request),
+    )
+    return {"index_job_id": index_job_id, "already_running": False}
+
+
+@app.get("/index-jobs/{index_job_id}")
+def get_index_job(
+    index_job_id: int, since_event_id: int = 0, limit: int = 200,
+    _auth: dict = Depends(dual_auth),
+):
+    """Snapshot of an index job + its events (oldest first, capped at `limit`)."""
+    rows = _backend.db.execute(
+        "SELECT id, tenant_id, repo_id, status, files_indexed, chunks_written, "
+        "       error, created_at, started_at, finished_at "
+        "FROM index_jobs WHERE id = :i",
+        {"i": index_job_id},
+    )
+    if not rows:
+        raise HTTPException(404, "index job not found")
+    _authorize_tenant_admin(_auth, rows[0]["tenant_id"])
+    events = _backend.db.execute(
+        """
+        SELECT id, event, payload, ts
+        FROM index_job_events
+        WHERE index_job_id = :i AND id > :since
+        ORDER BY id
+        LIMIT :lim
+        """,
+        {"i": index_job_id, "since": since_event_id, "lim": limit},
+    )
+    return {"job": rows[0], "events": events}
+
+
+@app.get("/index-jobs/{index_job_id}/sse")
+async def index_job_sse(index_job_id: int):
+    """Stream index-job events as SSE. Closes when status is completed or failed."""
+    if not _backend.db.execute("SELECT id FROM index_jobs WHERE id = :i",
+                               {"i": index_job_id}):
+        raise HTTPException(404, "index job not found")
+
+    TERMINAL = {"completed", "failed"}
+
+    async def stream():
+        last_id = 0
+        idle_ticks = 0
+        while True:
+            rows = _backend.db.execute(
+                """
+                SELECT id, event, payload, ts
+                FROM index_job_events
+                WHERE index_job_id = :i AND id > :last
+                ORDER BY id
+                """,
+                {"i": index_job_id, "last": last_id},
+            )
+            for r in rows:
+                last_id = r["id"]
+                idle_ticks = 0
+                payload_str = r["payload"] or "{}"
+                yield (
+                    f"id: {r['id']}\n"
+                    f"event: {r['event']}\n"
+                    f"data: {payload_str}\n\n"
+                )
+
+            srows = _backend.db.execute(
+                "SELECT status FROM index_jobs WHERE id = :i",
+                {"i": index_job_id},
+            )
+            status = (srows[0]["status"] if srows else None) or ""
+            if status in TERMINAL:
+                yield f"event: stream_closed\ndata: {json.dumps({'status': status})}\n\n"
+                break
+
             idle_ticks += 1
             if idle_ticks % 15 == 0:
                 yield ": keepalive\n\n"

@@ -8,9 +8,14 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from backend.common import get_backend
 from backend.ingest.chunker import Chunk, chunk_file, walk_repo
+
+
+# Event callback signature: (event_name, payload_dict) -> None.
+EventCallback = Callable[[str, dict], None]
 
 
 def index_name_for(tenant_id: int) -> str:
@@ -35,24 +40,33 @@ def index_repo(
     repo_full_name: str,
     installation_token: str,
     repo_root: Path | None = None,
+    on_event: EventCallback | None = None,
 ) -> dict:
     """Main entrypoint. Returns a stats dict.
 
     If `repo_root` is given, skip cloning and index the local checkout (useful for tests).
+    `on_event(name, payload)`, when supplied, is called at each phase boundary so callers
+    (e.g. the spawned `run_index_job` process) can persist progress to a DB or stream
+    it over SSE. CLI usage that omits the callback is unaffected.
     """
+    on = on_event or (lambda *_args, **_kwargs: None)
+
     backend = get_backend()
     index = index_name_for(tenant_id)
 
     with tempfile.TemporaryDirectory(prefix="devforge-index-") as td:
         if repo_root is None:
             repo_root = Path(td) / "repo"
+            on("clone_started", {"repo": repo_full_name})
             clone_with_token(repo_full_name, installation_token, repo_root)
+            on("clone_complete", {"repo": repo_full_name})
             cleanup = True
         else:
             cleanup = False
 
         files = walk_repo(repo_root)
         print(f"[index] {repo_full_name}: {len(files)} indexable files", flush=True)
+        on("walk_complete", {"file_count": len(files)})
 
         chunks_by_file: dict[str, list[Chunk]] = {}
         total_chunks = 0
@@ -64,6 +78,7 @@ def index_repo(
                 total_chunks += len(cs)
 
         print(f"[index] {total_chunks} chunks across {len(chunks_by_file)} files", flush=True)
+        on("chunking_complete", {"files": len(chunks_by_file), "chunks_total": total_chunks})
 
         # Embed + upsert in batches of 32 (keeps Chroma/S3V calls fast).
         items: list[dict] = []
@@ -93,9 +108,13 @@ def index_repo(
                     done += len(items)
                     items = []
                     print(f"[index]   {done}/{total_chunks} embedded", flush=True)
+                    on("embedding_progress", {"done": done, "total": total_chunks})
         if items:
             backend.vectors.put_many(index, items)
             done += len(items)
+            on("embedding_progress", {"done": done, "total": total_chunks})
+
+        on("embedding_complete", {"chunks_written": done})
 
         if cleanup and repo_root.exists():
             pass  # handled by tempdir context

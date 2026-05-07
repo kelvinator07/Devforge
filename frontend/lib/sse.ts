@@ -1,14 +1,18 @@
 /**
- * Job event tail — two implementations, same shape.
+ * Event-stream tail — two implementations, same shape.
  *
  *   SSE (default, used locally with uvicorn): @microsoft/fetch-event-source
  *   so we can attach a Clerk JWT in the Authorization header (browser-
  *   native EventSource can't set headers).
  *
  *   Polling (used on AWS via NEXT_PUBLIC_DEVFORGE_USE_POLLING=1): a 1.5s
- *   GET /jobs/{id}?since_event_id=N loop. AWS API Gateway HTTP API buffers
+ *   GET {pollPath}?since_event_id=N loop. AWS API Gateway HTTP API buffers
  *   the streaming SSE response so SSE is a non-starter there; polling
  *   delivers the same UX with ~1.5s extra latency per event.
+ *
+ * `tailJob` (ticket runs) and `tailIndexJob` (RAG indexing) both delegate
+ * to `tailEventStream` so adding a new event source is just picking the
+ * paths + terminal-status set.
  */
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 
@@ -20,7 +24,7 @@ export type IncomingEvent = {
   data: Record<string, unknown>;
 };
 
-const TERMINAL_STATUS = new Set([
+const JOB_TERMINAL_STATUS = new Set([
   "pr_opened",
   "failed",
   "refused",
@@ -31,21 +35,24 @@ const TERMINAL_STATUS = new Set([
 const USE_POLLING = process.env.NEXT_PUBLIC_DEVFORGE_USE_POLLING === "1";
 const POLL_INTERVAL_MS = 1500;
 
-export type TailJobOpts = {
-  jobId: number;
+export type TailEventStreamOpts = {
+  ssePath: string;   // e.g. /jobs/123/sse
+  pollPath: string;  // e.g. /jobs/123 — must accept ?since_event_id=N
+  terminalStatuses: ReadonlySet<string>;
   getToken: () => Promise<string | null>;
   onEvent: (e: IncomingEvent) => void;
   onClose?: () => void;
   onError?: (err: unknown) => void;
 };
 
-export function tailJob(opts: TailJobOpts): () => void {
-  return USE_POLLING ? pollJob(opts) : sseTailJob(opts);
+/** Generic event-stream consumer. SSE locally, long-poll on AWS. */
+export function tailEventStream(opts: TailEventStreamOpts): () => void {
+  return USE_POLLING ? pollStream(opts) : sseStream(opts);
 }
 
 // ---------- SSE (local) ----------
 
-function sseTailJob(opts: TailJobOpts): () => void {
+function sseStream(opts: TailEventStreamOpts): () => void {
   const ctrl = new AbortController();
   (async () => {
     const tok = await opts.getToken();
@@ -53,7 +60,7 @@ function sseTailJob(opts: TailJobOpts): () => void {
     if (tok) headers["Authorization"] = `Bearer ${tok}`;
 
     try {
-      await fetchEventSource(`${API}/jobs/${opts.jobId}/sse`, {
+      await fetchEventSource(`${API}${opts.ssePath}`, {
         headers,
         signal: ctrl.signal,
         openWhenHidden: true,
@@ -86,7 +93,7 @@ function sseTailJob(opts: TailJobOpts): () => void {
 
 // ---------- Polling (AWS) ----------
 
-function pollJob(opts: TailJobOpts): () => void {
+function pollStream(opts: TailEventStreamOpts): () => void {
   let sinceEventId = 0;
   let stopped = false;
   const ctrl = new AbortController();
@@ -98,7 +105,7 @@ function pollJob(opts: TailJobOpts): () => void {
       const headers: Record<string, string> = {};
       if (tok) headers["Authorization"] = `Bearer ${tok}`;
       const r = await fetch(
-        `${API}/jobs/${opts.jobId}?since_event_id=${sinceEventId}`,
+        `${API}${opts.pollPath}?since_event_id=${sinceEventId}`,
         { headers, signal: ctrl.signal },
       );
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
@@ -115,7 +122,7 @@ function pollJob(opts: TailJobOpts): () => void {
         opts.onEvent({ id: e.id, type: e.event, data });
       }
 
-      if (body.job?.status && TERMINAL_STATUS.has(body.job.status)) {
+      if (body.job?.status && opts.terminalStatuses.has(body.job.status)) {
         stopped = true;
         opts.onClose?.();
       }
@@ -133,4 +140,26 @@ function pollJob(opts: TailJobOpts): () => void {
     clearInterval(handle);
     ctrl.abort();
   };
+}
+
+// ---------- Job-specific wrapper (kept for back-compat) ----------
+
+export type TailJobOpts = {
+  jobId: number;
+  getToken: () => Promise<string | null>;
+  onEvent: (e: IncomingEvent) => void;
+  onClose?: () => void;
+  onError?: (err: unknown) => void;
+};
+
+export function tailJob(opts: TailJobOpts): () => void {
+  return tailEventStream({
+    ssePath: `/jobs/${opts.jobId}/sse`,
+    pollPath: `/jobs/${opts.jobId}`,
+    terminalStatuses: JOB_TERMINAL_STATUS,
+    getToken: opts.getToken,
+    onEvent: opts.onEvent,
+    onClose: opts.onClose,
+    onError: opts.onError,
+  });
 }

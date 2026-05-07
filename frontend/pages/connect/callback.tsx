@@ -1,10 +1,15 @@
 import { SignedIn, SignedOut, RedirectToSignIn, useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle, ArrowRight } from "lucide-react";
 
-import { connectInstallation } from "../../lib/api";
+import { connectInstallation, type Tenant } from "../../lib/api";
 import { consumeInstallState, setActive } from "../../lib/active";
+import {
+  isPythonLanguage,
+  tenantRepoFullNames,
+  useRepoLanguages,
+} from "../../lib/repoLanguages";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Spinner } from "../../components/ui/Spinner";
@@ -32,9 +37,18 @@ function ConnectCallbackInner() {
   const router = useRouter();
   const { getToken } = useAuth();
   const [status, setStatus] = useState<Status>({ kind: "validating" });
+  const [tenant, setTenant] = useState<Tenant | null>(null);
   // Guard against React strict-mode double-invoke + router.query re-creation
   // re-running the effect and consuming the state token twice.
   const ranRef = useRef(false);
+  // Guard against the language-resolution effect firing twice.
+  const finalizedRef = useRef(false);
+
+  const fullNames = useMemo(
+    () => (tenant ? tenantRepoFullNames([tenant]) : []),
+    [tenant],
+  );
+  const { languages, loading: langLoading } = useRepoLanguages(fullNames);
 
   useEffect(() => {
     if (!router.isReady || ranRef.current) return;
@@ -70,28 +84,54 @@ function ConnectCallbackInner() {
 
     setStatus({ kind: "connecting" });
     connectInstallation(getToken, { installation_id: installationId, state })
-      .then((tenant) => {
-        if (!tenant.repos.length) {
+      .then((connected) => {
+        if (!connected.repos.length) {
           setStatus({
             kind: "error",
             message: "GitHub install completed, but the App has no repository access. Re-install and grant at least one repo.",
           });
           return;
         }
-        setActive({ tenantId: tenant.id, repoId: tenant.repos[0].id });
-        setStatus({
-          kind: "success",
-          tenantId: tenant.id,
-          repoCount: tenant.repos.length,
-        });
-        // Navigate to dashboard after a brief beat so the success card is visible.
-        setTimeout(() => router.replace("/dashboard"), 900);
+        // Hand off to the finalize effect below; it waits for language
+        // detection and picks the first Python repo (or surfaces an error).
+        setTenant(connected);
       })
       .catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e);
         setStatus({ kind: "error", message: msg });
       });
   }, [router.isReady, router.query, getToken, router]);
+
+  // Finalize once the connected tenant + language detection are both ready.
+  useEffect(() => {
+    if (!tenant || langLoading || finalizedRef.current) return;
+    finalizedRef.current = true;
+
+    const pythonRepos = tenant.repos.filter((r) =>
+      isPythonLanguage(languages.get(r.full_name)),
+    );
+    if (!pythonRepos.length) {
+      setStatus({
+        kind: "error",
+        message:
+          "Install completed, but none of the granted repos are public Python projects. Re-install with a public Python repo and try again.",
+      });
+      return;
+    }
+    setActive({ tenantId: tenant.id, repoId: pythonRepos[0].id });
+    setStatus({
+      kind: "success",
+      tenantId: tenant.id,
+      repoCount: pythonRepos.length,
+    });
+    // Land on the setup page for the first Python repo so the user can
+    // index it before filing tickets. They can still skip to the dashboard
+    // from there if the repo is already indexed.
+    setTimeout(
+      () => router.replace(`/projects/${tenant.id}/${pythonRepos[0].id}/setup`),
+      900,
+    );
+  }, [tenant, langLoading, languages, router]);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-6">

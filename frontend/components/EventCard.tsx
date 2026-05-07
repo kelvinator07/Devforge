@@ -49,6 +49,18 @@ const ACCENT: Record<string, string> = {
   job_started: "border-l-zinc-500",
   job_done: "border-l-zinc-500",
   trace_started: "border-l-cyan-500",
+
+  // Indexing-job events
+  index_started: "border-l-zinc-500",
+  token_minted: "border-l-zinc-500",
+  clone_started: "border-l-blue-500",
+  clone_complete: "border-l-blue-500",
+  walk_complete: "border-l-blue-500",
+  chunking_complete: "border-l-indigo-500",
+  embedding_progress: "border-l-indigo-500",
+  embedding_complete: "border-l-emerald-500",
+  index_done: "border-l-emerald-500",
+  index_failed: "border-l-rose-500",
 };
 
 export function EventCard({ id, type, data, ts }: Props) {
@@ -124,6 +136,19 @@ function friendlySummary(type: string, d: Record<string, unknown>): string {
     case "cost_summary":     return `$${(d.spent_usd as number | undefined)?.toFixed?.(4) ?? "?"} · ${d.calls ?? "?"} calls`;
     case "trace_started":    return `trace_id: ${d.trace_id ?? "?"}`;
     case "job_done":         return d.ok ? `OK · ${d.pr_url ?? ""}` : `FAIL · ${d.reason ?? ""}`;
+
+    // Indexing-job events
+    case "index_started":      return `repo: ${d.repo ?? ""}`;
+    case "token_minted":       return "installation token minted";
+    case "clone_started":      return `cloning ${d.repo ?? ""}`;
+    case "clone_complete":     return "repo cloned";
+    case "walk_complete":      return `${d.file_count ?? "?"} indexable files`;
+    case "chunking_complete":  return `${d.chunks_total ?? "?"} chunks across ${d.files ?? "?"} files`;
+    case "embedding_progress": return `embedded ${d.done ?? "?"}/${d.total ?? "?"}`;
+    case "embedding_complete": return `${d.chunks_written ?? "?"} chunks embedded`;
+    case "index_done":         return d.ok ? `OK · ${d.files_indexed ?? "?"} files · ${d.chunks_written ?? "?"} chunks` : "FAIL";
+    case "index_failed":       return `FAIL · ${d.error ?? ""}`;
+
     default:                 return "";
   }
 }
